@@ -37,14 +37,14 @@ fn to_pixel(proj_x: f64, proj_y: f64, proj_z: f64, half_w: f64, half_h: f64) -> 
     [proj_x + half_w, half_h - proj_y, proj_z]
 }
 
-/// Render protein in HD cartoon mode using software rasterization.
+/// Render protein in HD mode using software rasterization.
 ///
 /// Returns a `Paragraph` widget built from half-block characters with per-pixel
 /// color and Lambert shading.
 ///
 /// - `width`: pixel width (= terminal columns)
 /// - `height`: pixel height (= terminal rows * 2)
-pub fn render_cartoon(
+pub fn render_hd(
     protein: &Protein,
     camera: &Camera,
     color_scheme: &ColorScheme,

@@ -68,16 +68,13 @@ impl Framebuffer {
     /// Shading: `intensity = max(ambient, dot(normal, light_dir))` where
     /// ambient = 0.15. Each color channel is scaled by the intensity.
     pub fn rasterize_triangle(&mut self, tri: &Triangle, light_dir: [f64; 3]) {
-        const AMBIENT: f64 = 0.45;
+        const AMBIENT: f64 = 0.15;
 
-        // --- Two-sided Lambert shading with wrap lighting ---
-        // Use abs(dot) so back-facing triangles also get proper lighting,
-        // then apply a half-Lambert wrap to soften the falloff
+        // --- Lambert shading intensity ---
         let dot = tri.normal[0] * light_dir[0]
             + tri.normal[1] * light_dir[1]
             + tri.normal[2] * light_dir[2];
-        let half_lambert = dot.abs() * 0.5 + 0.5; // wraps 0..1 → 0.5..1.0
-        let intensity = AMBIENT + (1.0 - AMBIENT) * half_lambert;
+        let intensity = if dot > AMBIENT { dot } else { AMBIENT };
 
         let shaded: [u8; 3] = [
             (tri.color[0] as f64 * intensity).min(255.0) as u8,

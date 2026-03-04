@@ -3,16 +3,16 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::render::braille;
-use crate::render::cartoon;
+use crate::render::hd;
 
 /// Render the main 3D viewport
 pub fn render_viewport(frame: &mut Frame, area: Rect, app: &App) {
     if app.hd_mode {
-        // HD / Cartoon mode uses HalfBlock (1x2 colored pixels per cell)
+        // HD mode uses HalfBlock (1x2 colored pixels per cell)
         let width = area.width as f64 * 1.0;
         let height = area.height as f64 * 2.0;
 
-        let canvas = cartoon::render_cartoon(
+        let canvas = hd::render_hd(
             &app.protein,
             &app.camera,
             &app.color_scheme,

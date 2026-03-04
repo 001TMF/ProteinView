@@ -23,9 +23,7 @@
 
 Terminal protein structure viewer -- load, rotate, and explore PDB/CIF structures right in your terminal.
 
-<!-- demo gif placeholder — convert assets/demo.mov to gif and uncomment:
 ![Demo](assets/demo.gif)
--->
 
 ![Cartoon ribbon rendering of antibody-antigen complex (1ZVH)](assets/cartoon-braille-1zvh.png)
 

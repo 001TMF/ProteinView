@@ -48,7 +48,8 @@ impl App {
         // Auto-fit: zoom so the protein fills ~70% of viewport
         // A typical terminal is ~80 chars wide → ~160 braille pixels
         // We want the protein diameter to span ~70% of that
-        let auto_zoom = 50.0 / radius;
+        // HD mode has ~1 pixel per column vs braille's ~2, so needs less zoom
+        let auto_zoom = if hd_mode { 20.0 / radius } else { 50.0 / radius };
         let mut camera = Camera::default();
         camera.zoom = auto_zoom;
         Self {

@@ -68,13 +68,15 @@ impl Framebuffer {
     /// Shading: `intensity = max(ambient, dot(normal, light_dir))` where
     /// ambient = 0.15. Each color channel is scaled by the intensity.
     pub fn rasterize_triangle(&mut self, tri: &Triangle, light_dir: [f64; 3]) {
-        const AMBIENT: f64 = 0.15;
+        const AMBIENT: f64 = 0.35;
 
-        // --- Lambert shading intensity ---
+        // --- Two-sided Lambert shading ---
+        // Use abs(dot) so back-facing triangles also get proper lighting
         let dot = tri.normal[0] * light_dir[0]
             + tri.normal[1] * light_dir[1]
             + tri.normal[2] * light_dir[2];
-        let intensity = if dot > AMBIENT { dot } else { AMBIENT };
+        let diffuse = dot.abs();
+        let intensity = AMBIENT + (1.0 - AMBIENT) * diffuse;
 
         let shaded: [u8; 3] = [
             (tri.color[0] as f64 * intensity).min(255.0) as u8,
@@ -228,7 +230,7 @@ impl Framebuffer {
 /// Consecutive cells with identical (fg, bg) pairs are merged into a single
 /// [`Span`] to reduce the number of styled segments ratatui needs to process.
 pub fn framebuffer_to_widget(fb: &Framebuffer) -> Paragraph<'static> {
-    let term_rows = fb.height / 2;
+    let term_rows = (fb.height + 1) / 2;
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(term_rows);
 
     for tr in 0..term_rows {
@@ -236,103 +238,78 @@ pub fn framebuffer_to_widget(fb: &Framebuffer) -> Paragraph<'static> {
         let bot_row = top_row + 1;
 
         let mut spans: Vec<Span<'static>> = Vec::new();
+
+        // We classify each cell into one of 4 cases and track runs of same type
+        // Case 0: blank (both black) → space, no styling (terminal bg shows through)
+        // Case 1: both have color → '▀' with fg=top, bg=bottom
+        // Case 2: top only → '▀' with fg=top, bg=Reset
+        // Case 3: bottom only → '▄' with fg=bottom, bg=Reset
+        #[derive(PartialEq, Clone, Copy)]
+        enum CellKind { Blank, Both([u8;3],[u8;3]), TopOnly([u8;3]), BotOnly([u8;3]) }
+
         let mut run_text = String::new();
-        let mut run_fg: [u8; 3] = [0; 3];
-        let mut run_bg: [u8; 3] = [0; 3];
+        let mut run_kind = CellKind::Blank;
         let mut run_started = false;
 
+        let flush = |spans: &mut Vec<Span<'static>>, text: &str, kind: &CellKind| {
+            if text.is_empty() { return; }
+            let style = match kind {
+                CellKind::Blank => Style::default(),
+                CellKind::Both(top, bot) => Style::default()
+                    .fg(Color::Rgb(top[0], top[1], top[2]))
+                    .bg(Color::Rgb(bot[0], bot[1], bot[2])),
+                CellKind::TopOnly(top) => Style::default()
+                    .fg(Color::Rgb(top[0], top[1], top[2])),
+                CellKind::BotOnly(bot) => Style::default()
+                    .fg(Color::Rgb(bot[0], bot[1], bot[2])),
+            };
+            spans.push(Span::styled(text.to_string(), style));
+        };
+
         for col in 0..fb.width {
-            let top_color = fb.color[top_row * fb.width + col];
-            let bot_color = if bot_row < fb.height {
+            let top = fb.color[top_row * fb.width + col];
+            let bot = if bot_row < fb.height {
                 fb.color[bot_row * fb.width + col]
             } else {
                 [0, 0, 0]
             };
 
-            let is_blank = top_color == [0, 0, 0] && bot_color == [0, 0, 0];
-            let fg = top_color;
-            let bg = bot_color;
+            let top_black = top == [0, 0, 0];
+            let bot_black = bot == [0, 0, 0];
 
-            if run_started && fg == run_fg && bg == run_bg {
-                // Extend current run
-                if is_blank {
-                    run_text.push(' ');
-                } else {
-                    run_text.push('\u{2580}'); // ▀
+            let kind = if top_black && bot_black {
+                CellKind::Blank
+            } else if !top_black && !bot_black {
+                CellKind::Both(top, bot)
+            } else if !top_black {
+                CellKind::TopOnly(top)
+            } else {
+                CellKind::BotOnly(bot)
+            };
+
+            if run_started && kind == run_kind {
+                match kind {
+                    CellKind::Blank => run_text.push(' '),
+                    CellKind::Both(..) | CellKind::TopOnly(_) => run_text.push('\u{2580}'),
+                    CellKind::BotOnly(_) => run_text.push('\u{2584}'),
                 }
             } else {
-                // Flush previous run
-                if run_started && !run_text.is_empty() {
-                    let style = Style::default()
-                        .fg(Color::Rgb(run_fg[0], run_fg[1], run_fg[2]))
-                        .bg(Color::Rgb(run_bg[0], run_bg[1], run_bg[2]));
-                    spans.push(Span::styled(run_text.clone(), style));
+                if run_started {
+                    flush(&mut spans, &run_text, &run_kind);
                 }
-                // Start new run
                 run_text.clear();
-                if is_blank {
-                    run_text.push(' ');
-                } else {
-                    run_text.push('\u{2580}');
+                match kind {
+                    CellKind::Blank => run_text.push(' '),
+                    CellKind::Both(..) | CellKind::TopOnly(_) => run_text.push('\u{2580}'),
+                    CellKind::BotOnly(_) => run_text.push('\u{2584}'),
                 }
-                run_fg = fg;
-                run_bg = bg;
+                run_kind = kind;
                 run_started = true;
             }
         }
 
-        // Flush final run
-        if run_started && !run_text.is_empty() {
-            let style = Style::default()
-                .fg(Color::Rgb(run_fg[0], run_fg[1], run_fg[2]))
-                .bg(Color::Rgb(run_bg[0], run_bg[1], run_bg[2]));
-            spans.push(Span::styled(run_text, style));
-        }
-
-        lines.push(Line::from(spans));
-    }
-
-    // Handle odd height: if fb.height is odd, the last pixel row has no partner
-    if fb.height % 2 == 1 {
-        let last_row = fb.height - 1;
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        let mut run_text = String::new();
-        let mut run_fg: [u8; 3] = [0; 3];
-        let mut run_started = false;
-
-        for col in 0..fb.width {
-            let fg = fb.color[last_row * fb.width + col];
-            let is_blank = fg == [0, 0, 0];
-
-            if run_started && fg == run_fg {
-                if is_blank {
-                    run_text.push(' ');
-                } else {
-                    run_text.push('\u{2580}');
-                }
-            } else {
-                if run_started && !run_text.is_empty() {
-                    let style = Style::default()
-                        .fg(Color::Rgb(run_fg[0], run_fg[1], run_fg[2]))
-                        .bg(Color::Rgb(0, 0, 0));
-                    spans.push(Span::styled(run_text.clone(), style));
-                }
-                run_text.clear();
-                if is_blank {
-                    run_text.push(' ');
-                } else {
-                    run_text.push('\u{2580}');
-                }
-                run_fg = fg;
-                run_started = true;
-            }
-        }
-
-        if run_started && !run_text.is_empty() {
-            let style = Style::default()
-                .fg(Color::Rgb(run_fg[0], run_fg[1], run_fg[2]))
-                .bg(Color::Rgb(0, 0, 0));
-            spans.push(Span::styled(run_text, style));
+        if run_started {
+            flush(&mut spans, &run_text, &run_kind);
         }
 
         lines.push(Line::from(spans));

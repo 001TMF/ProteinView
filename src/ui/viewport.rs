@@ -16,6 +16,7 @@ pub fn render_viewport(frame: &mut Frame, area: Rect, app: &App) {
             &app.protein,
             &app.camera,
             &app.color_scheme,
+            app.viz_mode,
             width,
             height,
         );
@@ -30,6 +31,7 @@ pub fn render_viewport(frame: &mut Frame, area: Rect, app: &App) {
             &app.protein,
             &app.camera,
             &app.color_scheme,
+            app.viz_mode,
             width,
             height,
         );

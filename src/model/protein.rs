@@ -73,6 +73,29 @@ impl Protein {
             .count()
     }
 
+    /// Get the bounding radius from origin (call after centering)
+    pub fn bounding_radius(&self) -> f64 {
+        self.chains.iter()
+            .flat_map(|c| &c.residues)
+            .flat_map(|r| &r.atoms)
+            .filter(|a| a.is_ca)
+            .map(|a| (a.x * a.x + a.y * a.y + a.z * a.z).sqrt())
+            .fold(0.0f64, f64::max)
+    }
+
+    /// Get ALL atoms with their residue and chain context
+    pub fn all_atoms(&self) -> Vec<(&Atom, &Residue, &Chain)> {
+        let mut atoms = Vec::new();
+        for chain in &self.chains {
+            for residue in &chain.residues {
+                for atom in &residue.atoms {
+                    atoms.push((atom, residue, chain));
+                }
+            }
+        }
+        atoms
+    }
+
     /// Center the protein at the origin
     pub fn center(&mut self) {
         let atoms: Vec<&Atom> = self.chains.iter()

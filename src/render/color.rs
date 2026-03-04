@@ -1,5 +1,5 @@
 use ratatui::style::Color;
-use crate::model::protein::{Chain, Residue, SecondaryStructure};
+use crate::model::protein::{Atom, Chain, Residue, SecondaryStructure};
 
 /// Available color schemes
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -53,6 +53,30 @@ impl ColorScheme {
             ColorSchemeType::Element => Color::Rgb(144, 144, 144), // Default to carbon gray
             ColorSchemeType::BFactor => self.bfactor_color(residue),
             ColorSchemeType::Rainbow => self.rainbow_color(residue),
+        }
+    }
+
+    /// Get color for an individual atom, respecting the current scheme.
+    /// When using Element coloring, colors vary by element type (CPK-like).
+    /// For other schemes, falls back to residue-level coloring.
+    pub fn atom_color(&self, atom: &Atom, residue: &Residue, chain: &Chain) -> Color {
+        match self.scheme_type {
+            ColorSchemeType::Element => Self::element_color(atom),
+            _ => self.residue_color(residue, chain),
+        }
+    }
+
+    /// CPK-style element coloring
+    fn element_color(atom: &Atom) -> Color {
+        match atom.element.trim() {
+            "C" => Color::Rgb(144, 144, 144), // Gray
+            "N" => Color::Rgb(48, 80, 248),   // Blue
+            "O" => Color::Rgb(255, 13, 13),   // Red
+            "S" => Color::Rgb(255, 255, 48),  // Yellow
+            "H" => Color::Rgb(255, 255, 255), // White
+            "P" => Color::Rgb(255, 128, 0),   // Orange
+            "FE" | "Fe" => Color::Rgb(224, 102, 51), // Iron orange
+            _ => Color::Rgb(200, 200, 200),   // Light gray default
         }
     }
 

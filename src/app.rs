@@ -44,9 +44,16 @@ impl App {
     pub fn new(mut protein: Protein, hd_mode: bool) -> Self {
         protein.center();
         let total_residues = protein.residue_count();
+        let radius = protein.bounding_radius().max(1.0);
+        // Auto-fit: zoom so the protein fills ~70% of viewport
+        // A typical terminal is ~80 chars wide → ~160 braille pixels
+        // We want the protein diameter to span ~70% of that
+        let auto_zoom = 50.0 / radius;
+        let mut camera = Camera::default();
+        camera.zoom = auto_zoom;
         Self {
             protein,
-            camera: Camera::default(),
+            camera,
             color_scheme: ColorScheme::new(ColorSchemeType::Structure, total_residues),
             viz_mode: VizMode::Backbone,
             current_chain: 0,

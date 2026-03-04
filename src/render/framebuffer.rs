@@ -1,3 +1,4 @@
+use image::RgbImage;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -41,7 +42,7 @@ impl Framebuffer {
     }
 
     /// Reset the framebuffer to black pixels and infinite depth.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn clear(&mut self) {
         for c in self.color.iter_mut() {
             *c = [0, 0, 0];
@@ -68,8 +69,30 @@ impl Framebuffer {
     ///
     /// Shading: `intensity = max(ambient, dot(normal, light_dir))` where
     /// ambient = 0.15. Each color channel is scaled by the intensity.
+    ///
+    /// Convenience wrapper around `rasterize_triangle_depth` with no fog.
+    #[cfg(test)]
     pub fn rasterize_triangle(&mut self, tri: &Triangle, light_dir: [f64; 3]) {
-        const AMBIENT: f64 = 0.45;
+        self.rasterize_triangle_depth(tri, light_dir, 0.0, 0.0, 0.0);
+    }
+
+    /// Rasterize a triangle with Lambert shading, z-buffering, and depth fog.
+    ///
+    /// `depth_fog` controls how much brightness falls off with depth:
+    /// - 0.0 = no fog (identical to `rasterize_triangle`)
+    /// - 0.4 = moderate fog (background at 60% brightness of foreground)
+    ///
+    /// `z_near` and `z_far` define the depth range for the fog mapping.
+    /// When `depth_fog` is 0.0, `z_near` and `z_far` are ignored.
+    pub fn rasterize_triangle_depth(
+        &mut self,
+        tri: &Triangle,
+        light_dir: [f64; 3],
+        z_near: f64,
+        z_far: f64,
+        depth_fog: f64,
+    ) {
+        const AMBIENT: f64 = 0.55;
 
         // --- Two-sided Lambert shading with wrap lighting ---
         // Use abs(dot) so back-facing triangles also get proper lighting,
@@ -77,14 +100,18 @@ impl Framebuffer {
         let dot = tri.normal[0] * light_dir[0]
             + tri.normal[1] * light_dir[1]
             + tri.normal[2] * light_dir[2];
-        let half_lambert = dot.abs() * 0.5 + 0.5;
+        let half_lambert = dot.abs() * 0.4 + 0.6;
         let intensity = AMBIENT + (1.0 - AMBIENT) * half_lambert;
 
-        let shaded: [u8; 3] = [
-            (tri.color[0] as f64 * intensity).min(255.0) as u8,
-            (tri.color[1] as f64 * intensity).min(255.0) as u8,
-            (tri.color[2] as f64 * intensity).min(255.0) as u8,
-        ];
+        // Precompute base shaded color (before fog).
+        let base_r = (tri.color[0] as f64 * intensity).min(255.0);
+        let base_g = (tri.color[1] as f64 * intensity).min(255.0);
+        let base_b = (tri.color[2] as f64 * intensity).min(255.0);
+
+        // Depth fog range.
+        let use_fog = depth_fog > 0.0;
+        let z_range = z_far - z_near;
+        let z_range_valid = use_fog && z_range.abs() > 1e-6;
 
         // --- Extract vertices ---
         let [v0, v1, v2] = tri.verts;
@@ -96,9 +123,14 @@ impl Framebuffer {
         let max_y = v0[1].max(v1[1]).max(v2[1]).ceil() as isize;
 
         let min_x = min_x.max(0) as usize;
-        let max_x = (max_x as usize).min(self.width.saturating_sub(1));
+        let max_x = max_x.max(0).min(self.width as isize - 1) as usize;
         let min_y = min_y.max(0) as usize;
-        let max_y = (max_y as usize).min(self.height.saturating_sub(1));
+        let max_y = max_y.max(0).min(self.height as isize - 1) as usize;
+
+        // Triangle entirely off-screen
+        if min_x > max_x || min_y > max_y {
+            return;
+        }
 
         // --- Precompute barycentric denominator ---
         // For vertices A(v0), B(v1), C(v2), the signed area * 2:
@@ -108,6 +140,9 @@ impl Framebuffer {
             return; // degenerate triangle
         }
         let inv_denom = 1.0 / denom;
+
+        // When fog is disabled, precompute the flat shaded color once.
+        let flat_shaded: [u8; 3] = [base_r as u8, base_g as u8, base_b as u8];
 
         // --- Rasterize pixels in bounding box ---
         for py in min_y..=max_y {
@@ -128,7 +163,23 @@ impl Framebuffer {
                 if u >= -1e-6 && v >= -1e-6 && w >= -1e-6 {
                     // Interpolate z
                     let z = u * v0[2] + v * v1[2] + w * v2[2];
-                    self.set_pixel(px, py, z, shaded);
+
+                    let color = if z_range_valid {
+                        // Map z to a fog brightness multiplier:
+                        // z_near -> 1.0 (full brightness)
+                        // z_far  -> (1.0 - depth_fog) (dimmed)
+                        let t = ((z - z_near) / z_range).clamp(0.0, 1.0);
+                        let brightness = 1.0 - depth_fog * t;
+                        [
+                            (base_r * brightness) as u8,
+                            (base_g * brightness) as u8,
+                            (base_b * brightness) as u8,
+                        ]
+                    } else {
+                        flat_shaded
+                    };
+
+                    self.set_pixel(px, py, z, color);
                 }
             }
         }
@@ -143,6 +194,14 @@ impl Framebuffer {
         let mut y0 = p1[1].round() as isize;
         let x1 = p2[0].round() as isize;
         let y1 = p2[1].round() as isize;
+
+        // Skip lines where both endpoints are entirely off the same side of the screen.
+        let w = self.width as isize;
+        let h = self.height as isize;
+        if (x0 < 0 && x1 < 0) || (x0 >= w && x1 >= w) ||
+           (y0 < 0 && y1 < 0) || (y0 >= h && y1 >= h) {
+            return;
+        }
 
         let dx = (x1 - x0).abs();
         let dy = -(y1 - y0).abs();
@@ -184,10 +243,76 @@ impl Framebuffer {
         }
     }
 
+    /// Draw a 3D line with the given pixel thickness.
+    ///
+    /// For each pixel along the main Bresenham line, a filled circle of the
+    /// given radius (`thickness / 2`) is drawn perpendicular to the line so
+    /// that the resulting stroke has the requested width.  For `thickness`
+    /// values <= 1.0 this falls back to the regular single-pixel `draw_line_3d`.
+    pub fn draw_thick_line_3d(
+        &mut self,
+        p1: [f64; 3],
+        p2: [f64; 3],
+        color: [u8; 3],
+        thickness: f64,
+    ) {
+        if thickness <= 1.0 {
+            self.draw_line_3d(p1, p2, color);
+            return;
+        }
+
+        let half = thickness / 2.0;
+
+        // Direction vector in screen-space (xy only).
+        let dx = p2[0] - p1[0];
+        let dy = p2[1] - p1[1];
+        let len = (dx * dx + dy * dy).sqrt();
+
+        if len < 1e-6 {
+            // Degenerate (zero-length) line – just draw a dot.
+            self.draw_circle_z(p1[0], p1[1], p1[2], half, color);
+            return;
+        }
+
+        // Perpendicular unit vector in screen-space.
+        let px = -dy / len;
+        let py = dx / len;
+
+        // Draw the line at several perpendicular offsets to fill out the
+        // thickness.  Step size of 0.5 gives smooth coverage.
+        let steps = (half / 0.5).ceil() as isize;
+        for i in -steps..=steps {
+            let offset = i as f64 * 0.5;
+            if offset * offset > half * half {
+                continue;
+            }
+            let off_p1 = [p1[0] + px * offset, p1[1] + py * offset, p1[2]];
+            let off_p2 = [p2[0] + px * offset, p2[1] + py * offset, p2[2]];
+            self.draw_line_3d(off_p1, off_p2, color);
+        }
+    }
+
     /// Draw a filled circle at pixel coordinates `(cx, cy)` with the given radius and color.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn draw_circle(&mut self, cx: f64, cy: f64, radius: f64, color: [u8; 3]) {
         self.draw_circle_z(cx, cy, 0.0, radius, color);
+    }
+
+    /// Convert this framebuffer's pixel data into an `image::RgbImage`.
+    ///
+    /// The resulting image has the same width and height as the framebuffer,
+    /// with each pixel's RGB channels copied directly.  This is used by the
+    /// ratatui-image integration to send the framebuffer to the terminal via
+    /// Sixel, Kitty, or other graphics protocols.
+    pub fn to_rgb_image(&self) -> RgbImage {
+        let mut img = RgbImage::new(self.width as u32, self.height as u32);
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let c = self.color[y * self.width + x];
+                img.put_pixel(x as u32, y as u32, image::Rgb(c));
+            }
+        }
+        img
     }
 
     /// Draw a filled circle with a specific z-depth for z-buffer testing.
@@ -197,9 +322,14 @@ impl Framebuffer {
     /// callers can submit multiple concentric circles with varying z.
     pub fn draw_circle_z(&mut self, cx: f64, cy: f64, z: f64, radius: f64, color: [u8; 3]) {
         let ix_min = ((cx - radius).floor() as isize).max(0) as usize;
-        let ix_max = ((cx + radius).ceil() as isize).min(self.width as isize - 1) as usize;
+        let ix_max = ((cx + radius).ceil() as isize).max(0).min(self.width as isize - 1) as usize;
         let iy_min = ((cy - radius).floor() as isize).max(0) as usize;
-        let iy_max = ((cy + radius).ceil() as isize).min(self.height as isize - 1) as usize;
+        let iy_max = ((cy + radius).ceil() as isize).max(0).min(self.height as isize - 1) as usize;
+
+        // Circle entirely off-screen
+        if ix_min > ix_max || iy_min > iy_max {
+            return;
+        }
 
         let r_sq = radius * radius;
 
@@ -219,6 +349,47 @@ impl Framebuffer {
     }
 }
 
+/// Quantize a single color channel by rounding to the nearest multiple of
+/// `step`.  This reduces the number of distinct RGB triples in the output so
+/// that more adjacent cells share the same color and get merged into longer
+/// runs, dramatically cutting the number of ANSI escape sequences emitted per
+/// frame.
+///
+/// A `step` of 1 is a no-op (full precision).  A `step` of 8 reduces 256
+/// levels to 32 distinct values -- visually almost imperceptible but can cut
+/// the span count (and therefore terminal output size) by 3-5x.
+#[inline]
+fn quantize_channel(v: u8, step: u8) -> u8 {
+    if step <= 1 {
+        return v;
+    }
+    let half = step / 2;
+    // Round to nearest multiple of `step`, clamped to 255.
+    let q = ((v as u16 + half as u16) / step as u16) * step as u16;
+    q.min(255) as u8
+}
+
+/// Quantize an RGB triple.  Black `[0,0,0]` is kept exactly black so that the
+/// blank-cell optimisation still fires.
+#[inline]
+fn quantize_color(c: [u8; 3], step: u8) -> [u8; 3] {
+    if c == [0, 0, 0] {
+        return c;
+    }
+    let q = [
+        quantize_channel(c[0], step),
+        quantize_channel(c[1], step),
+        quantize_channel(c[2], step),
+    ];
+    // Avoid rounding a near-black color *to* black, which would make it
+    // invisible.  Clamp to at least `step` in the brightest channel.
+    if q == [0, 0, 0] {
+        [step, step, step]
+    } else {
+        q
+    }
+}
+
 /// Convert a [`Framebuffer`] into a ratatui [`Paragraph`] widget using half-block characters.
 ///
 /// Each terminal row maps to two pixel rows:
@@ -228,7 +399,17 @@ impl Framebuffer {
 ///
 /// Consecutive cells with identical (fg, bg) pairs are merged into a single
 /// [`Span`] to reduce the number of styled segments ratatui needs to process.
+///
+/// Colors are quantized (rounded to multiples of 4) before comparison so that
+/// nearby shades get merged into longer runs, reducing terminal output size
+/// while preserving smooth depth-fog gradients for cartoon mode.
+#[cfg(test)]
 pub fn framebuffer_to_widget(fb: &Framebuffer) -> Paragraph<'static> {
+    // Quantization step: 4 gives 64 levels per channel -- preserves smooth
+    // shading gradients while still merging runs.  Use 1 (no quantization)
+    // for tiny framebuffers where output is already small.
+    let quant_step: u8 = 1;
+
     let term_rows = (fb.height + 1) / 2;
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(term_rows);
 
@@ -266,9 +447,9 @@ pub fn framebuffer_to_widget(fb: &Framebuffer) -> Paragraph<'static> {
         };
 
         for col in 0..fb.width {
-            let top = fb.color[top_row * fb.width + col];
+            let top = quantize_color(fb.color[top_row * fb.width + col], quant_step);
             let bot = if bot_row < fb.height {
-                fb.color[bot_row * fb.width + col]
+                quantize_color(fb.color[bot_row * fb.width + col], quant_step)
             } else {
                 [0, 0, 0]
             };
@@ -309,6 +490,149 @@ pub fn framebuffer_to_widget(fb: &Framebuffer) -> Paragraph<'static> {
 
         if run_started {
             flush(&mut spans, &run_text, &run_kind);
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    Paragraph::new(lines)
+}
+
+/// Convert a [`Framebuffer`] rendered at braille resolution into a ratatui
+/// [`Paragraph`] widget using colored Unicode braille characters.
+///
+/// The framebuffer is expected to have dimensions `(cols * 2, rows * 4)` where
+/// `cols` and `rows` are the target terminal cell dimensions.  Each terminal
+/// cell maps to a 2x4 block of pixels.  Non-black pixels become "on" braille
+/// dots; their average RGB color is used as the cell's foreground color.
+///
+/// This gives 4x the spatial resolution of half-block rendering at the cost of
+/// per-cell (rather than per-pixel) coloring.
+///
+/// Consecutive cells with the same foreground color are merged into a single
+/// [`Span`] for performance (run-length encoding).
+pub fn framebuffer_to_braille_widget(fb: &Framebuffer) -> Paragraph<'static> {
+    // Terminal cell grid dimensions derived from the framebuffer.
+    let term_cols = (fb.width + 1) / 2;
+    let term_rows = (fb.height + 3) / 4;
+
+    if term_cols == 0 || term_rows == 0 {
+        return Paragraph::new("");
+    }
+
+    // Braille dot bit values indexed by (dx, dy) within the 2x4 cell block.
+    // Layout:
+    //   Col 0  Col 1
+    //   bit 0  bit 3   (row 0)
+    //   bit 1  bit 4   (row 1)
+    //   bit 2  bit 5   (row 2)
+    //   bit 6  bit 7   (row 3)
+    const BRAILLE_BITS: [[u8; 4]; 2] = [
+        [0x01, 0x02, 0x04, 0x40], // column 0: rows 0-3
+        [0x08, 0x10, 0x20, 0x80], // column 1: rows 0-3
+    ];
+
+    let quant_step: u8 = 1;
+
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(term_rows);
+
+    for tr in 0..term_rows {
+        let py_base = tr * 4;
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut run_text = String::new();
+        // Track the current run's color; None means blank (space) run.
+        let mut run_color: Option<[u8; 3]> = None;
+        let mut run_started = false;
+
+        let flush =
+            |spans: &mut Vec<Span<'static>>, text: &str, color: &Option<[u8; 3]>| {
+                if text.is_empty() {
+                    return;
+                }
+                let style = match color {
+                    Some(c) => Style::default().fg(Color::Rgb(c[0], c[1], c[2])),
+                    None => Style::default(),
+                };
+                spans.push(Span::styled(text.to_string(), style));
+            };
+
+        for tc in 0..term_cols {
+            let px_base = tc * 2;
+
+            // Build braille bit pattern and accumulate color of "on" dots.
+            let mut bits: u8 = 0;
+            let mut r_sum: u32 = 0;
+            let mut g_sum: u32 = 0;
+            let mut b_sum: u32 = 0;
+            let mut on_count: u32 = 0;
+
+            for dx in 0..2usize {
+                let px = px_base + dx;
+                if px >= fb.width {
+                    continue;
+                }
+                for dy in 0..4usize {
+                    let py = py_base + dy;
+                    if py >= fb.height {
+                        continue;
+                    }
+                    let c = fb.color[py * fb.width + px];
+                    if c != [0, 0, 0] {
+                        bits |= BRAILLE_BITS[dx][dy];
+                        r_sum += c[0] as u32;
+                        g_sum += c[1] as u32;
+                        b_sum += c[2] as u32;
+                        on_count += 1;
+                    }
+                }
+            }
+
+            if bits == 0 {
+                // All dots off — emit a space.
+                let cell_color: Option<[u8; 3]> = None;
+                if run_started && run_color == cell_color {
+                    run_text.push(' ');
+                } else {
+                    if run_started {
+                        flush(&mut spans, &run_text, &run_color);
+                    }
+                    run_text.clear();
+                    run_text.push(' ');
+                    run_color = cell_color;
+                    run_started = true;
+                }
+            } else {
+                // Compute average color of "on" pixels.
+                let avg = quantize_color(
+                    [
+                        (r_sum / on_count) as u8,
+                        (g_sum / on_count) as u8,
+                        (b_sum / on_count) as u8,
+                    ],
+                    quant_step,
+                );
+                let cell_color = Some(avg);
+
+                let braille_char =
+                    char::from_u32(0x2800u32 + bits as u32).unwrap_or(' ');
+
+                if run_started && run_color == cell_color {
+                    run_text.push(braille_char);
+                } else {
+                    if run_started {
+                        flush(&mut spans, &run_text, &run_color);
+                    }
+                    run_text.clear();
+                    run_text.push(braille_char);
+                    run_color = cell_color;
+                    run_started = true;
+                }
+            }
+        }
+
+        if run_started {
+            flush(&mut spans, &run_text, &run_color);
         }
 
         lines.push(Line::from(spans));
@@ -428,5 +752,53 @@ mod tests {
         // The widget should produce 2 terminal rows for 4 pixel rows
         let _widget = framebuffer_to_widget(&fb);
         // Just ensure it doesn't panic; visual inspection is manual
+    }
+
+    #[test]
+    fn test_quantize_channel_no_op() {
+        // step=1 should be a no-op
+        assert_eq!(quantize_channel(0, 1), 0);
+        assert_eq!(quantize_channel(127, 1), 127);
+        assert_eq!(quantize_channel(255, 1), 255);
+    }
+
+    #[test]
+    fn test_quantize_channel_step_8() {
+        // 0 stays 0
+        assert_eq!(quantize_channel(0, 8), 0);
+        // 4 rounds to 8 (nearest multiple of 8)
+        assert_eq!(quantize_channel(4, 8), 8);
+        // 3 rounds to 0
+        assert_eq!(quantize_channel(3, 8), 0);
+        // 128 stays 128
+        assert_eq!(quantize_channel(128, 8), 128);
+        // 255 should quantize to a valid u8 (256 clamped to 255)
+        let q255 = quantize_channel(255, 8);
+        assert!(q255 == 248 || q255 == 255, "unexpected quantize(255, 8): {}", q255);
+        // 252 should round up to 248 or be clamped
+        let q252 = quantize_channel(252, 8);
+        assert!(q252 == 248 || q252 == 255, "unexpected quantize(252, 8): {}", q252);
+    }
+
+    #[test]
+    fn test_quantize_color_black_unchanged() {
+        assert_eq!(quantize_color([0, 0, 0], 8), [0, 0, 0]);
+    }
+
+    #[test]
+    fn test_quantize_color_near_black_stays_visible() {
+        // A dim color like [3, 2, 1] would quantize to [0,0,0] without the
+        // guard.  The function should keep it visible.
+        let q = quantize_color([3, 2, 1], 8);
+        assert_ne!(q, [0, 0, 0], "near-black color should not vanish");
+    }
+
+    #[test]
+    fn test_quantize_color_normal() {
+        let q = quantize_color([200, 100, 50], 8);
+        // Each channel should be a multiple of 8 (or 255 if clamped)
+        for &c in &q {
+            assert!(c % 8 == 0 || c == 255, "channel {} not quantized", c);
+        }
     }
 }

@@ -3,3 +3,6 @@
 *.swo
 *~
 .DS_Store
+debug.log
+DESIGN_RESEARCH.md
+assets/demo.mov

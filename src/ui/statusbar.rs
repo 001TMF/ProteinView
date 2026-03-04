@@ -15,7 +15,7 @@ pub fn render_statusbar(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let res_count = app.protein.residue_count();
-    let render_mode = if app.hd_mode { "Cartoon" } else { "Braille" };
+    let render_mode = if app.hd_mode { "HD" } else { "Braille" };
 
     let status = Paragraph::new(Line::from(vec![
         Span::styled("├", Style::default().fg(Color::DarkGray)),

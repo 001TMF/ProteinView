@@ -17,21 +17,21 @@ use crate::render::color::ColorScheme;
 // ---------------------------------------------------------------------------
 
 /// Number of spline subdivisions between each pair of C-alpha atoms.
-const SPLINE_SUBDIVISIONS: usize = 6;
+const SPLINE_SUBDIVISIONS: usize = 14;
 
 /// Number of vertices around the coil/turn tube cross-section.
-const COIL_SEGMENTS: usize = 6;
+const COIL_SEGMENTS: usize = 12;
 
 /// Cross-section dimensions (in Angstroms).
-const HELIX_HALF_WIDTH: f64 = 0.75;
-const HELIX_HALF_HEIGHT: f64 = 0.20;
+const HELIX_HALF_WIDTH: f64 = 1.30;
+const HELIX_HALF_HEIGHT: f64 = 0.40;
 
-const SHEET_HALF_WIDTH: f64 = 1.00;
-const SHEET_HALF_HEIGHT: f64 = 0.10;
+const SHEET_HALF_WIDTH: f64 = 1.50;
+const SHEET_HALF_HEIGHT: f64 = 0.20;
 
-const SHEET_ARROW_HALF_WIDTH: f64 = 1.50;
+const SHEET_ARROW_HALF_WIDTH: f64 = 2.20;
 
-const COIL_RADIUS: f64 = 0.25;
+const COIL_RADIUS: f64 = 0.40;
 
 // ---------------------------------------------------------------------------
 // Output type

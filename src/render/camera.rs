@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 /// 3D camera for viewing protein structures
 #[derive(Debug, Clone)]
 pub struct Camera {
@@ -8,6 +10,7 @@ pub struct Camera {
     pub pan_x: f64,
     pub pan_y: f64,
     pub auto_rotate: bool,
+    last_tick: Instant,
 }
 
 impl Default for Camera {
@@ -20,6 +23,7 @@ impl Default for Camera {
             pan_x: 0.0,
             pan_y: 0.0,
             auto_rotate: false,
+            last_tick: Instant::now(),
         }
     }
 }
@@ -45,9 +49,15 @@ impl Camera {
     pub fn pan(&mut self, dx: f64, dy: f64) { self.pan_x += dx * Self::PAN_STEP; self.pan_y += dy * Self::PAN_STEP; }
     pub fn reset(&mut self) { *self = Self::default(); }
 
+    /// Auto-rotate speed in radians per second (~0.6 rad/s = one full turn in ~10s).
+    const AUTO_ROTATE_SPEED: f64 = 0.6;
+
     pub fn tick(&mut self) {
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_tick).as_secs_f64();
+        self.last_tick = now;
         if self.auto_rotate {
-            self.rot_y += 0.02;
+            self.rot_y += Self::AUTO_ROTATE_SPEED * dt;
         }
     }
 

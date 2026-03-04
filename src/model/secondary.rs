@@ -1,12 +1,14 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
 use crate::model::protein::{Protein, SecondaryStructure};
 
-/// A secondary structure range parsed from PDB HELIX/SHEET records.
+/// A secondary structure range parsed from PDB HELIX/SHEET records or CIF categories.
 #[derive(Debug, Clone)]
 pub struct SSRange {
-    pub chain_id: char,
+    /// Chain identifier (may be multi-character for CIF auth_asym_id)
+    pub chain_id: String,
     pub start_seq: i32,
     pub end_seq: i32,
     pub ss_type: SecondaryStructure,
@@ -57,7 +59,7 @@ fn parse_ss_records(file_path: &str) -> Vec<SSRange> {
             // We use the initChainID as the canonical chain.
             if init_chain == end_chain {
                 ranges.push(SSRange {
-                    chain_id: init_chain,
+                    chain_id: init_chain.to_string(),
                     start_seq: init_seq,
                     end_seq: end_seq,
                     ss_type: SecondaryStructure::Helix,
@@ -87,7 +89,7 @@ fn parse_ss_records(file_path: &str) -> Vec<SSRange> {
 
             if init_chain == end_chain {
                 ranges.push(SSRange {
-                    chain_id: init_chain,
+                    chain_id: init_chain.to_string(),
                     start_seq: init_seq,
                     end_seq: end_seq,
                     ss_type: SecondaryStructure::Sheet,
@@ -108,12 +110,16 @@ pub fn assign_from_pdb_file(protein: &mut Protein, file_path: &str) {
         return;
     }
 
+    apply_ss_ranges(protein, &ranges);
+}
+
+/// Apply a list of SSRange entries to a protein, setting the secondary
+/// structure for each residue that falls within a range.
+fn apply_ss_ranges(protein: &mut Protein, ranges: &[SSRange]) {
     for chain in &mut protein.chains {
-        // The chain id in our model is a String; PDB records use a single char.
-        let chain_char = chain.id.chars().next().unwrap_or(' ');
         for residue in &mut chain.residues {
-            for range in &ranges {
-                if range.chain_id == chain_char
+            for range in ranges {
+                if chain.id == range.chain_id
                     && residue.seq_num >= range.start_seq
                     && residue.seq_num <= range.end_seq
                 {
@@ -122,5 +128,397 @@ pub fn assign_from_pdb_file(protein: &mut Protein, file_path: &str) {
                 }
             }
         }
+    }
+}
+
+/// Split a CIF data line into whitespace-separated tokens, respecting
+/// single-quoted strings (e.g. 'some value') as a single token.
+fn tokenize_cif_line(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut chars = line.chars().peekable();
+    while let Some(&ch) = chars.peek() {
+        if ch.is_whitespace() {
+            chars.next();
+        } else if ch == '\'' {
+            // Quoted token: consume until matching closing quote followed by
+            // whitespace or end-of-line.
+            chars.next(); // skip opening quote
+            let mut token = String::new();
+            loop {
+                match chars.next() {
+                    Some('\'') => {
+                        // Check if next char is whitespace or end
+                        match chars.peek() {
+                            None | Some(&' ') | Some(&'\t') => break,
+                            Some(_) => token.push('\''),
+                        }
+                    }
+                    Some(c) => token.push(c),
+                    None => break,
+                }
+            }
+            tokens.push(token);
+        } else {
+            // Unquoted token
+            let mut token = String::new();
+            while let Some(&c) = chars.peek() {
+                if c.is_whitespace() {
+                    break;
+                }
+                token.push(c);
+                chars.next();
+            }
+            tokens.push(token);
+        }
+    }
+    tokens
+}
+
+/// Parse secondary structure records from a CIF/mmCIF file.
+///
+/// Reads `_struct_conf` (helices) and `_struct_sheet_range` (sheets) loop
+/// categories. Uses `auth_asym_id` and `auth_seq_id` fields to match
+/// the chain and residue identifiers produced by pdbtbx.
+fn parse_cif_ss_records(file_path: &str) -> Vec<SSRange> {
+    let file = match File::open(file_path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let reader = BufReader::new(file);
+    let mut ranges = Vec::new();
+
+    // We need to parse two different loop categories. We'll do it in a
+    // single pass using a simple state machine.
+    #[derive(PartialEq)]
+    enum ParseState {
+        Scanning,
+        StructConfHeaders,
+        StructConfData,
+        SheetRangeHeaders,
+        SheetRangeData,
+    }
+
+    let mut state = ParseState::Scanning;
+    let mut column_names: Vec<String> = Vec::new();
+    let mut col_map: HashMap<String, usize> = HashMap::new();
+
+    let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let line = &lines[i];
+        let trimmed = line.trim();
+
+        match state {
+            ParseState::Scanning => {
+                if trimmed == "loop_" {
+                    // Peek at next lines to determine which category this loop belongs to
+                    if i + 1 < lines.len() {
+                        let next = lines[i + 1].trim().to_string();
+                        if next.starts_with("_struct_conf.") {
+                            state = ParseState::StructConfHeaders;
+                            column_names.clear();
+                            col_map.clear();
+                        } else if next.starts_with("_struct_sheet_range.") {
+                            state = ParseState::SheetRangeHeaders;
+                            column_names.clear();
+                            col_map.clear();
+                        }
+                    }
+                }
+            }
+
+            ParseState::StructConfHeaders => {
+                if trimmed.starts_with("_struct_conf.") {
+                    let col_name = trimmed.to_string();
+                    col_map.insert(col_name.clone(), column_names.len());
+                    column_names.push(col_name);
+                } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                    // First data line
+                    state = ParseState::StructConfData;
+                    // Process this line as data (don't skip it)
+                    let tokens = tokenize_cif_line(trimmed);
+                    if let Some(range) = parse_struct_conf_row(&tokens, &col_map) {
+                        ranges.push(range);
+                    }
+                } else if trimmed.starts_with('#') || trimmed.is_empty() {
+                    // End of loop with no data
+                    state = ParseState::Scanning;
+                }
+            }
+
+            ParseState::StructConfData => {
+                if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("loop_")
+                    || trimmed.starts_with('_')
+                {
+                    state = ParseState::Scanning;
+                    // Don't advance i, re-process in Scanning state
+                    continue;
+                }
+                let tokens = tokenize_cif_line(trimmed);
+                if let Some(range) = parse_struct_conf_row(&tokens, &col_map) {
+                    ranges.push(range);
+                }
+            }
+
+            ParseState::SheetRangeHeaders => {
+                if trimmed.starts_with("_struct_sheet_range.") {
+                    let col_name = trimmed.to_string();
+                    col_map.insert(col_name.clone(), column_names.len());
+                    column_names.push(col_name);
+                } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                    // First data line
+                    state = ParseState::SheetRangeData;
+                    let tokens = tokenize_cif_line(trimmed);
+                    if let Some(range) = parse_sheet_range_row(&tokens, &col_map) {
+                        ranges.push(range);
+                    }
+                } else if trimmed.starts_with('#') || trimmed.is_empty() {
+                    state = ParseState::Scanning;
+                }
+            }
+
+            ParseState::SheetRangeData => {
+                if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("loop_")
+                    || trimmed.starts_with('_')
+                {
+                    state = ParseState::Scanning;
+                    continue;
+                }
+                let tokens = tokenize_cif_line(trimmed);
+                if let Some(range) = parse_sheet_range_row(&tokens, &col_map) {
+                    ranges.push(range);
+                }
+            }
+        }
+
+        i += 1;
+    }
+
+    ranges
+}
+
+/// Parse a single data row from the _struct_conf loop into an SSRange (helix).
+/// Returns None if the row cannot be parsed or is not a helix type.
+fn parse_struct_conf_row(tokens: &[String], col_map: &HashMap<String, usize>) -> Option<SSRange> {
+    // conf_type_id must start with HELX for helix (e.g., HELX_P)
+    let conf_type_idx = *col_map.get("_struct_conf.conf_type_id")?;
+    let conf_type = tokens.get(conf_type_idx)?;
+    if !conf_type.starts_with("HELX") {
+        // Could be TURN or other types; we only handle helices here
+        // TURN types could be added later if needed
+        return None;
+    }
+
+    // Use auth fields first, fall back to label fields
+    let beg_chain = get_cif_field(tokens, col_map,
+        "_struct_conf.beg_auth_asym_id", "_struct_conf.beg_label_asym_id")?;
+    let end_chain = get_cif_field(tokens, col_map,
+        "_struct_conf.end_auth_asym_id", "_struct_conf.end_label_asym_id")?;
+    let beg_seq_str = get_cif_field(tokens, col_map,
+        "_struct_conf.beg_auth_seq_id", "_struct_conf.beg_label_seq_id")?;
+    let end_seq_str = get_cif_field(tokens, col_map,
+        "_struct_conf.end_auth_seq_id", "_struct_conf.end_label_seq_id")?;
+
+    if beg_chain != end_chain {
+        return None;
+    }
+
+    let start_seq: i32 = beg_seq_str.parse().ok()?;
+    let end_seq: i32 = end_seq_str.parse().ok()?;
+
+    Some(SSRange {
+        chain_id: beg_chain,
+        start_seq,
+        end_seq,
+        ss_type: SecondaryStructure::Helix,
+    })
+}
+
+/// Parse a single data row from the _struct_sheet_range loop into an SSRange (sheet).
+fn parse_sheet_range_row(tokens: &[String], col_map: &HashMap<String, usize>) -> Option<SSRange> {
+    let beg_chain = get_cif_field(tokens, col_map,
+        "_struct_sheet_range.beg_auth_asym_id", "_struct_sheet_range.beg_label_asym_id")?;
+    let end_chain = get_cif_field(tokens, col_map,
+        "_struct_sheet_range.end_auth_asym_id", "_struct_sheet_range.end_label_asym_id")?;
+    let beg_seq_str = get_cif_field(tokens, col_map,
+        "_struct_sheet_range.beg_auth_seq_id", "_struct_sheet_range.beg_label_seq_id")?;
+    let end_seq_str = get_cif_field(tokens, col_map,
+        "_struct_sheet_range.end_auth_seq_id", "_struct_sheet_range.end_label_seq_id")?;
+
+    if beg_chain != end_chain {
+        return None;
+    }
+
+    let start_seq: i32 = beg_seq_str.parse().ok()?;
+    let end_seq: i32 = end_seq_str.parse().ok()?;
+
+    Some(SSRange {
+        chain_id: beg_chain,
+        start_seq,
+        end_seq,
+        ss_type: SecondaryStructure::Sheet,
+    })
+}
+
+/// Retrieve a CIF field value from tokenized data, preferring the primary
+/// column name and falling back to the fallback column name.
+/// Returns None if neither column exists or the value is "?" (missing).
+fn get_cif_field(
+    tokens: &[String],
+    col_map: &HashMap<String, usize>,
+    primary: &str,
+    fallback: &str,
+) -> Option<String> {
+    let idx = col_map.get(primary).or_else(|| col_map.get(fallback))?;
+    let val = tokens.get(*idx)?;
+    if val == "?" || val == "." {
+        return None;
+    }
+    Some(val.clone())
+}
+
+/// Parse secondary structure from CIF _struct_conf and _struct_sheet_range
+/// categories and assign to matching residues in the protein.
+/// Uses auth_asym_id/auth_seq_id to match pdbtbx's chain/residue numbering.
+pub fn assign_from_cif_file(protein: &mut Protein, file_path: &str) {
+    let ranges = parse_cif_ss_records(file_path);
+    if ranges.is_empty() {
+        return;
+    }
+    apply_ss_ranges(protein, &ranges);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tokenize_cif_line_basic() {
+        let tokens = tokenize_cif_line("HELX_P HELX_P1 1 GLY A 4   ? HIS A 15  ? GLY L 4   HIS L 15  1 ? 12");
+        assert_eq!(tokens[0], "HELX_P");
+        assert_eq!(tokens[1], "HELX_P1");
+        assert_eq!(tokens[2], "1");
+        assert_eq!(tokens[3], "GLY");
+        assert_eq!(tokens[4], "A");
+        assert_eq!(tokens[5], "4");
+        assert_eq!(tokens[6], "?");
+        assert_eq!(tokens.len(), 20);
+    }
+
+    #[test]
+    fn test_tokenize_cif_quoted_string() {
+        let tokens = tokenize_cif_line("A 1 'hello world' B");
+        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens[0], "A");
+        assert_eq!(tokens[1], "1");
+        assert_eq!(tokens[2], "hello world");
+        assert_eq!(tokens[3], "B");
+    }
+
+    #[test]
+    fn test_parse_cif_ss_records_from_example_file() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/1ZVH.cif");
+        let ranges = parse_cif_ss_records(path);
+
+        // 1ZVH.cif has 9 HELX_P records and 17 sheet range records
+        let helix_count = ranges.iter().filter(|r| r.ss_type == SecondaryStructure::Helix).count();
+        let sheet_count = ranges.iter().filter(|r| r.ss_type == SecondaryStructure::Sheet).count();
+
+        assert_eq!(helix_count, 9, "Expected 9 helix ranges, got {}", helix_count);
+        assert_eq!(sheet_count, 17, "Expected 17 sheet ranges, got {}", sheet_count);
+
+        // Check first helix: chain L, residues 4-15
+        let first_helix = ranges.iter().find(|r| r.ss_type == SecondaryStructure::Helix).unwrap();
+        assert_eq!(first_helix.chain_id, "L");
+        assert_eq!(first_helix.start_seq, 4);
+        assert_eq!(first_helix.end_seq, 15);
+
+        // Check a helix on chain A (auth_asym_id): residues 87-91
+        let chain_a_helix = ranges.iter()
+            .find(|r| r.ss_type == SecondaryStructure::Helix && r.chain_id == "A")
+            .unwrap();
+        assert_eq!(chain_a_helix.start_seq, 87);
+        assert_eq!(chain_a_helix.end_seq, 91);
+    }
+
+    #[test]
+    fn test_assign_from_cif_file_sets_secondary_structure() {
+        use crate::model::protein::{Protein, Chain, Residue, Atom};
+
+        // Build a minimal protein matching 1ZVH chain L residues 1-20
+        let mut residues = Vec::new();
+        for i in 1..=20 {
+            residues.push(Residue {
+                name: "ALA".to_string(),
+                seq_num: i,
+                atoms: vec![Atom {
+                    name: "CA".to_string(),
+                    element: "C".to_string(),
+                    x: 0.0, y: 0.0, z: 0.0,
+                    b_factor: 0.0,
+                    is_ca: true,
+                }],
+                secondary_structure: SecondaryStructure::Coil,
+            });
+        }
+        let mut protein = Protein {
+            name: "test".to_string(),
+            chains: vec![Chain { id: "L".to_string(), residues }],
+        };
+
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/1ZVH.cif");
+        assign_from_cif_file(&mut protein, path);
+
+        let chain = &protein.chains[0];
+        // Residues 1-3 should be Coil
+        assert_eq!(chain.residues[0].secondary_structure, SecondaryStructure::Coil); // res 1
+        assert_eq!(chain.residues[1].secondary_structure, SecondaryStructure::Coil); // res 2
+        assert_eq!(chain.residues[2].secondary_structure, SecondaryStructure::Coil); // res 3
+
+        // Residues 4-15 should be Helix (first helix)
+        assert_eq!(chain.residues[3].secondary_structure, SecondaryStructure::Helix); // res 4
+        assert_eq!(chain.residues[14].secondary_structure, SecondaryStructure::Helix); // res 15
+
+        // Residues 16-18 should be Coil (gap between helices)
+        assert_eq!(chain.residues[15].secondary_structure, SecondaryStructure::Coil); // res 16
+        assert_eq!(chain.residues[16].secondary_structure, SecondaryStructure::Coil); // res 17
+        assert_eq!(chain.residues[17].secondary_structure, SecondaryStructure::Coil); // res 18
+
+        // Residues 19-20: res 19 starts helix 2 (19-23)
+        assert_eq!(chain.residues[18].secondary_structure, SecondaryStructure::Helix); // res 19
+        assert_eq!(chain.residues[19].secondary_structure, SecondaryStructure::Helix); // res 20
+    }
+
+    #[test]
+    fn test_full_cif_load_has_non_coil_residues() {
+        // Integration test: load the full CIF file through the parser
+        // and verify that secondary structure was assigned
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/1ZVH.cif");
+        let protein = crate::parser::pdb::load_structure(path).unwrap();
+
+        let total_residues = protein.residue_count();
+        let non_coil = protein.chains.iter()
+            .flat_map(|c| &c.residues)
+            .filter(|r| r.secondary_structure != SecondaryStructure::Coil)
+            .count();
+
+        assert!(total_residues > 0, "Protein should have residues");
+        assert!(non_coil > 0,
+            "Expected some non-Coil residues after CIF SS assignment, but all {} residues are Coil",
+            total_residues);
+
+        // Should have both helices and sheets
+        let helix_count = protein.chains.iter()
+            .flat_map(|c| &c.residues)
+            .filter(|r| r.secondary_structure == SecondaryStructure::Helix)
+            .count();
+        let sheet_count = protein.chains.iter()
+            .flat_map(|c| &c.residues)
+            .filter(|r| r.secondary_structure == SecondaryStructure::Sheet)
+            .count();
+
+        assert!(helix_count > 0, "Expected helix residues, got 0");
+        assert!(sheet_count > 0, "Expected sheet residues, got 0");
     }
 }

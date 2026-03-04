@@ -40,14 +40,6 @@ fn draw_thick_line(
     }
 }
 
-/// Draw a small cross/dot marker at a position to indicate an atom.
-fn draw_atom_dot(ctx: &mut Context<'_>, x: f64, y: f64, color: ratatui::style::Color) {
-    let d = 0.3;
-    // Small cross
-    ctx.draw(&Line { x1: x - d, y1: y, x2: x + d, y2: y, color });
-    ctx.draw(&Line { x1: x, y1: y - d, x2: x, y2: y + d, color });
-}
-
 /// Check whether two atoms are bonded in 3D space.
 /// Returns true if they are in the same residue and within 1.9 Angstroms,
 /// or if they form a peptide bond (C of residue i to N of residue i+1 in same chain).
@@ -64,9 +56,8 @@ fn atoms_bonded_3d(
 
 /// Render protein on a ratatui Canvas with the Braille marker.
 /// Behavior depends on VizMode:
-/// - Backbone: Connect C-alpha atoms with thick lines (5 offsets)
+/// - Backbone/Cartoon: Connect C-alpha atoms with thick lines (5 offsets)
 /// - Wireframe: All atoms, thin single bond lines
-/// - BallAndStick: All atoms with dot markers + 3-offset bond lines
 pub fn render_protein<'a>(
     protein: &'a Protein,
     camera: &'a Camera,
@@ -81,14 +72,11 @@ pub fn render_protein<'a>(
         .y_bounds([-height / 2.0, height / 2.0])
         .paint(move |ctx| {
             match viz_mode {
-                VizMode::Backbone => {
+                VizMode::Backbone | VizMode::Cartoon => {
                     render_backbone(ctx, protein, camera, color_scheme);
                 }
                 VizMode::Wireframe => {
-                    render_wireframe(ctx, protein, camera, color_scheme, false);
-                }
-                VizMode::BallAndStick => {
-                    render_wireframe(ctx, protein, camera, color_scheme, true);
+                    render_wireframe(ctx, protein, camera, color_scheme);
                 }
             }
         })
@@ -125,19 +113,14 @@ fn render_backbone(
     }
 }
 
-/// Wireframe / Ball+Stick rendering: all atoms with bonds.
-/// If `ball_and_stick` is true, draw atom dots and use 3 parallel offsets for bonds.
-/// If false (wireframe), draw single thin lines.
+/// Wireframe rendering: all atoms with thin single bond lines.
 fn render_wireframe(
     ctx: &mut Context<'_>,
     protein: &Protein,
     camera: &Camera,
     color_scheme: &ColorScheme,
-    ball_and_stick: bool,
 ) {
-    let bond_offsets_bas: [f64; 3] = [0.0, 0.2, -0.2];
-    let bond_offsets_wire: [f64; 1] = [0.0];
-    let offsets: &[f64] = if ball_and_stick { &bond_offsets_bas } else { &bond_offsets_wire };
+    let offsets: [f64; 1] = [0.0];
 
     for chain in &protein.chains {
         // Process each residue: intra-residue bonds
@@ -149,14 +132,6 @@ fn render_wireframe(
                 (a, proj)
             }).collect();
 
-            // Draw atom dots for ball+stick mode
-            if ball_and_stick {
-                for (atom, proj) in &projected {
-                    let color = color_scheme.atom_color(atom, residue, chain);
-                    draw_atom_dot(ctx, proj.x, proj.y, color);
-                }
-            }
-
             // Intra-residue bonds: check all atom pairs within the residue
             for i in 0..atom_count {
                 for j in (i + 1)..atom_count {
@@ -164,7 +139,7 @@ fn render_wireframe(
                     let (a2, p2) = &projected[j];
                     if atoms_bonded_3d(a1.x, a1.y, a1.z, a2.x, a2.y, a2.z) {
                         let color = color_scheme.atom_color(a1, residue, chain);
-                        draw_thick_line(ctx, p1.x, p1.y, p2.x, p2.y, color, offsets);
+                        draw_thick_line(ctx, p1.x, p1.y, p2.x, p2.y, color, &offsets);
                     }
                 }
             }
@@ -183,7 +158,7 @@ fn render_wireframe(
                 let p1 = camera.project(c.x, c.y, c.z);
                 let p2 = camera.project(n.x, n.y, n.z);
                 let color = color_scheme.atom_color(c, res_curr, chain);
-                draw_thick_line(ctx, p1.x, p1.y, p2.x, p2.y, color, offsets);
+                draw_thick_line(ctx, p1.x, p1.y, p2.x, p2.y, color, &offsets);
             }
         }
     }

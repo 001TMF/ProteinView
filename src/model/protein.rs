@@ -35,10 +35,10 @@ pub struct Atom {
 
 /// Secondary structure classification
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)]
 pub enum SecondaryStructure {
     Helix,
     Sheet,
+    #[allow(dead_code)]
     Turn,
     Coil,
 }

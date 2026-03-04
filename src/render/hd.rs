@@ -1,11 +1,75 @@
-use ratatui::widgets::Paragraph;
-
 use crate::app::VizMode;
 use crate::model::protein::Protein;
 use crate::render::camera::Camera;
 use crate::render::color::ColorScheme;
-use crate::render::framebuffer::{default_light_dir, framebuffer_to_widget, Framebuffer, Triangle};
-use crate::render::ribbon::generate_ribbon_mesh;
+use crate::render::framebuffer::{default_light_dir, Framebuffer, Triangle};
+use crate::render::ribbon::RibbonTriangle;
+
+/// Render the protein into a raw [`Framebuffer`] at the given pixel dimensions.
+///
+/// This is the core rasterization entry-point.  Callers decide how to present
+/// the result -- either via braille characters or via a graphics-protocol
+/// image (Sixel / Kitty) through ratatui-image.
+pub fn render_hd_framebuffer(
+    protein: &Protein,
+    camera: &Camera,
+    color_scheme: &ColorScheme,
+    viz_mode: VizMode,
+    width: f64,
+    height: f64,
+    mesh: &[RibbonTriangle],
+) -> Framebuffer {
+    let px_w = width as usize;
+    let px_h = height as usize;
+    if px_w == 0 || px_h == 0 {
+        return Framebuffer::new(1, 1);
+    }
+
+    let mut fb = Framebuffer::new(px_w, px_h);
+    let light_dir = default_light_dir();
+    let half_w = px_w as f64 / 2.0;
+    let half_h = px_h as f64 / 2.0;
+
+    match viz_mode {
+        VizMode::Cartoon => {
+            let mut z_min = f64::INFINITY;
+            let mut z_max = f64::NEG_INFINITY;
+            for tri in mesh {
+                for vert in &tri.verts {
+                    let p = camera.project(vert[0], vert[1], vert[2]);
+                    let pz = p.z;
+                    if pz < z_min { z_min = pz; }
+                    if pz > z_max { z_max = pz; }
+                }
+            }
+            for tri in mesh {
+                let v0 = camera.project(tri.verts[0][0], tri.verts[0][1], tri.verts[0][2]);
+                let v1 = camera.project(tri.verts[1][0], tri.verts[1][1], tri.verts[1][2]);
+                let v2 = camera.project(tri.verts[2][0], tri.verts[2][1], tri.verts[2][2]);
+                let rotated_normal =
+                    rotate_normal(camera, tri.normal[0], tri.normal[1], tri.normal[2]);
+                let screen_tri = Triangle {
+                    verts: [
+                        to_pixel(v0.x, v0.y, v0.z, half_w, half_h),
+                        to_pixel(v1.x, v1.y, v1.z, half_w, half_h),
+                        to_pixel(v2.x, v2.y, v2.z, half_w, half_h),
+                    ],
+                    color: tri.color,
+                    normal: rotated_normal,
+                };
+                fb.rasterize_triangle_depth(&screen_tri, light_dir, z_min, z_max, 0.25);
+            }
+        }
+        VizMode::Backbone => {
+            render_backbone_fb(&mut fb, protein, camera, color_scheme, half_w, half_h);
+        }
+        VizMode::Wireframe => {
+            render_wireframe_fb(&mut fb, protein, camera, color_scheme, half_w, half_h);
+        }
+    }
+
+    fb
+}
 
 fn color_to_rgb(color: ratatui::style::Color) -> [u8; 3] {
     match color {
@@ -37,64 +101,30 @@ fn to_pixel(proj_x: f64, proj_y: f64, proj_z: f64, half_w: f64, half_h: f64) -> 
     [proj_x + half_w, half_h - proj_y, proj_z]
 }
 
-/// Render protein in HD mode using software rasterization.
-///
-/// Returns a `Paragraph` widget built from half-block characters with per-pixel
-/// color and Lambert shading.
-///
-/// - `width`: pixel width (= terminal columns)
-/// - `height`: pixel height (= terminal rows * 2)
-pub fn render_hd(
+/// Render backbone CA trace to framebuffer.
+fn render_backbone_fb(
+    fb: &mut Framebuffer,
     protein: &Protein,
     camera: &Camera,
     color_scheme: &ColorScheme,
-    viz_mode: VizMode,
-    width: f64,
-    height: f64,
-) -> Paragraph<'static> {
-    let px_w = width as usize;
-    let px_h = height as usize;
-    if px_w == 0 || px_h == 0 {
-        return Paragraph::new("");
-    }
-
-    let mut fb = Framebuffer::new(px_w, px_h);
-    let light_dir = default_light_dir();
-    let half_w = px_w as f64 / 2.0;
-    let half_h = px_h as f64 / 2.0;
-
-    match viz_mode {
-        VizMode::Backbone => {
-            let mesh = generate_ribbon_mesh(protein, color_scheme);
-            for tri in &mesh {
-                let v0 = camera.project(tri.verts[0][0], tri.verts[0][1], tri.verts[0][2]);
-                let v1 = camera.project(tri.verts[1][0], tri.verts[1][1], tri.verts[1][2]);
-                let v2 = camera.project(tri.verts[2][0], tri.verts[2][1], tri.verts[2][2]);
-
-                let rotated_normal =
-                    rotate_normal(camera, tri.normal[0], tri.normal[1], tri.normal[2]);
-
-                let screen_tri = Triangle {
-                    verts: [
-                        to_pixel(v0.x, v0.y, v0.z, half_w, half_h),
-                        to_pixel(v1.x, v1.y, v1.z, half_w, half_h),
-                        to_pixel(v2.x, v2.y, v2.z, half_w, half_h),
-                    ],
-                    color: tri.color,
-                    normal: rotated_normal,
-                };
-                fb.rasterize_triangle(&screen_tri, light_dir);
+    half_w: f64,
+    half_h: f64,
+) {
+    for chain in &protein.chains {
+        let mut prev: Option<([f64; 3], [u8; 3])> = None;
+        for residue in &chain.residues {
+            if let Some(ca) = residue.atoms.iter().find(|a| a.is_ca) {
+                let p = camera.project(ca.x, ca.y, ca.z);
+                let px = to_pixel(p.x, p.y, p.z, half_w, half_h);
+                let color = color_to_rgb(color_scheme.residue_color(residue, chain));
+                fb.draw_circle_z(px[0], px[1], px[2], 2.5, color);
+                if let Some((prev_px, prev_color)) = prev {
+                    fb.draw_thick_line_3d(prev_px, px, prev_color, 2.0);
+                }
+                prev = Some((px, color));
             }
         }
-        VizMode::Wireframe => {
-            render_wireframe_fb(&mut fb, protein, camera, color_scheme, false, half_w, half_h);
-        }
-        VizMode::BallAndStick => {
-            render_wireframe_fb(&mut fb, protein, camera, color_scheme, true, half_w, half_h);
-        }
     }
-
-    framebuffer_to_widget(&fb)
 }
 
 fn atoms_bonded_3d(
@@ -111,18 +141,20 @@ fn atoms_bonded_3d(
     dx * dx + dy * dy + dz * dz <= 1.9 * 1.9
 }
 
-/// Render wireframe or ball-and-stick to framebuffer.
+/// Render wireframe mode to framebuffer.
+///
+/// All atoms are always rendered (the integer underflow fix in `draw_circle_z`
+/// prevents the freeze that previously required skipping atoms for large
+/// proteins).  Small dots are drawn at every atom position so that atoms are
+/// visible at bond intersections.
 fn render_wireframe_fb(
     fb: &mut Framebuffer,
     protein: &Protein,
     camera: &Camera,
     color_scheme: &ColorScheme,
-    ball_and_stick: bool,
     half_w: f64,
     half_h: f64,
 ) {
-    let atom_radius = if ball_and_stick { 2.0 } else { 0.0 };
-
     for chain in &protein.chains {
         for residue in &chain.residues {
             let projected: Vec<_> = residue
@@ -136,26 +168,25 @@ fn render_wireframe_fb(
                 })
                 .collect();
 
-            // Draw atom dots for ball+stick
-            if ball_and_stick {
-                for (_, px, color) in &projected {
-                    fb.draw_circle_z(px[0], px[1], px[2], atom_radius, *color);
-                }
+            // Draw small dots at atom positions so atoms are visible at bond
+            // intersections.
+            for (_, px, color) in &projected {
+                fb.draw_circle_z(px[0], px[1], px[2], 1.5, *color);
             }
 
-            // Intra-residue bonds
+            // Intra-residue bonds (thick lines)
             for i in 0..projected.len() {
                 for j in (i + 1)..projected.len() {
                     let (a1, p1, c1) = &projected[i];
                     let (a2, p2, _) = &projected[j];
                     if atoms_bonded_3d(a1.x, a1.y, a1.z, a2.x, a2.y, a2.z) {
-                        fb.draw_line_3d(*p1, *p2, *c1);
+                        fb.draw_thick_line_3d(*p1, *p2, *c1, 1.5);
                     }
                 }
             }
         }
 
-        // Inter-residue peptide bonds
+        // Inter-residue peptide bonds (thick lines)
         for i in 0..chain.residues.len().saturating_sub(1) {
             let res_curr = &chain.residues[i];
             let res_next = &chain.residues[i + 1];
@@ -168,7 +199,7 @@ fn render_wireframe_fb(
                 let px1 = to_pixel(p1.x, p1.y, p1.z, half_w, half_h);
                 let px2 = to_pixel(p2.x, p2.y, p2.z, half_w, half_h);
                 let color = color_to_rgb(color_scheme.atom_color(c, res_curr, chain));
-                fb.draw_line_3d(px1, px2, color);
+                fb.draw_thick_line_3d(px1, px2, color, 1.5);
             }
         }
     }

@@ -4,10 +4,20 @@ version = "0.1.0"
 edition = "2024"
 description = "Terminal protein structure viewer"
 license = "MIT"
+authors = ["Tristan Farmer"]
+repository = "https://github.com/tristanfarmer/proteinview"
+homepage = "https://github.com/tristanfarmer/proteinview"
+readme = "README.md"
+keywords = ["protein", "pdb", "terminal", "tui", "bioinformatics"]
+categories = ["command-line-utilities", "science", "visualization"]
+rust-version = "1.85"
+exclude = ["examples/*.pdb", "examples/*.cif", "debug.log", "DESIGN_RESEARCH.md"]
 
 [dependencies]
 ratatui = "0.29"
 crossterm = "0.28"
+ratatui-image = { version = "9.0.0", default-features = false, features = ["crossterm"] }
+image = "0.25"
 pdbtbx = { version = "0.12", features = ["rstar"] }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
@@ -17,3 +27,8 @@ tokio = { version = "1", features = ["rt", "macros"], optional = true }
 [features]
 default = []
 fetch = ["dep:reqwest", "dep:tokio"]
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1

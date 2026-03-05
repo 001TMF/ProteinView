@@ -4,7 +4,15 @@ use crate::model::secondary::{assign_from_pdb_file, assign_from_cif_file};
 
 /// Load a protein structure from a PDB or mmCIF file
 pub fn load_structure(path: &str) -> Result<Protein> {
+    // Try default strictness first, fall back to loose + atomic-coords-only
+    // for files like AlphaFold3 output that have non-standard metadata
     let (pdb, _errors) = pdbtbx::open(path)
+        .or_else(|_| {
+            pdbtbx::ReadOptions::new()
+                .set_level(pdbtbx::StrictnessLevel::Loose)
+                .set_only_atomic_coords(true)
+                .read(path)
+        })
         .map_err(|e| anyhow::anyhow!("Failed to open structure file: {:?}", e))?;
 
     let mut chains = Vec::new();

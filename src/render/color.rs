@@ -183,6 +183,7 @@ impl ColorScheme {
 }
 
 /// Returns true if the residue name corresponds to a nucleotide (RNA or DNA base).
+#[allow(dead_code)]
 pub fn is_nucleotide(name: &str) -> bool {
     matches!(
         name,

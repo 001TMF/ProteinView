@@ -133,6 +133,11 @@ impl ColorScheme {
     }
 
     fn structure_color(&self, residue: &Residue) -> Color {
+        // Nucleotide residues get base-type coloring
+        if let Some(color) = nucleotide_base_color(&residue.name) {
+            return color;
+        }
+
         match residue.secondary_structure {
             SecondaryStructure::Helix => Color::Rgb(255, 0, 128),
             SecondaryStructure::Sheet => Color::Rgb(255, 200, 0),
@@ -177,6 +182,30 @@ impl ColorScheme {
     }
 }
 
+/// Returns true if the residue name corresponds to a nucleotide (RNA or DNA base).
+pub fn is_nucleotide(name: &str) -> bool {
+    matches!(
+        name,
+        "A" | "DA" | "AMP"
+            | "U" | "UMP"
+            | "T" | "DT"
+            | "G" | "DG" | "GMP"
+            | "C" | "DC" | "CMP"
+    )
+}
+
+/// Returns a base-type color for nucleotide residues, or `None` for non-nucleotides.
+fn nucleotide_base_color(name: &str) -> Option<Color> {
+    match name {
+        "A" | "DA" | "AMP" => Some(Color::Rgb(220, 60, 60)),   // Adenine — red
+        "U" | "UMP"        => Some(Color::Rgb(60, 60, 220)),   // Uracil — blue
+        "T" | "DT"         => Some(Color::Rgb(60, 60, 220)),   // Thymine — blue
+        "G" | "DG" | "GMP" => Some(Color::Rgb(60, 180, 60)),   // Guanine — green
+        "C" | "DC" | "CMP" => Some(Color::Rgb(220, 200, 40)),  // Cytosine — yellow
+        _ => None,
+    }
+}
+
 /// Convert HSV to RGB (h: 0-360, s: 0-1, v: 0-1)
 fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
     let c = v * s;
@@ -191,4 +220,137 @@ fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
         _ => (c, 0.0, x),
     };
     (((r + m) * 255.0) as u8, ((g + m) * 255.0) as u8, ((b + m) * 255.0) as u8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::protein::{Residue, SecondaryStructure};
+
+    /// Build a minimal residue for testing color assignment.
+    fn make_residue(name: &str, ss: SecondaryStructure) -> Residue {
+        Residue {
+            name: name.to_string(),
+            seq_num: 1,
+            atoms: vec![],
+            secondary_structure: ss,
+        }
+    }
+
+    // ---- is_nucleotide helper ----
+
+    #[test]
+    fn is_nucleotide_rna_bases() {
+        for name in &["A", "U", "G", "C"] {
+            assert!(is_nucleotide(name), "{name} should be recognized as nucleotide");
+        }
+    }
+
+    #[test]
+    fn is_nucleotide_dna_bases() {
+        for name in &["DA", "DT", "DG", "DC"] {
+            assert!(is_nucleotide(name), "{name} should be recognized as nucleotide");
+        }
+    }
+
+    #[test]
+    fn is_nucleotide_modified_forms() {
+        for name in &["AMP", "UMP", "GMP", "CMP"] {
+            assert!(is_nucleotide(name), "{name} should be recognized as nucleotide");
+        }
+    }
+
+    #[test]
+    fn is_nucleotide_rejects_amino_acids() {
+        for name in &["ALA", "GLY", "CYS", "THR", "TRP", "LEU"] {
+            assert!(!is_nucleotide(name), "{name} should NOT be recognized as nucleotide");
+        }
+    }
+
+    // ---- structure_color: nucleotide residues ----
+
+    #[test]
+    fn structure_color_adenine_variants() {
+        let scheme = ColorScheme::new(ColorSchemeType::Structure, 100);
+        let expected = Color::Rgb(220, 60, 60);
+
+        for name in &["A", "DA", "AMP"] {
+            let r = make_residue(name, SecondaryStructure::Coil);
+            assert_eq!(scheme.structure_color(&r), expected, "Adenine variant {name}");
+        }
+    }
+
+    #[test]
+    fn structure_color_uracil_variants() {
+        let scheme = ColorScheme::new(ColorSchemeType::Structure, 100);
+        let expected = Color::Rgb(60, 60, 220);
+
+        for name in &["U", "UMP"] {
+            let r = make_residue(name, SecondaryStructure::Coil);
+            assert_eq!(scheme.structure_color(&r), expected, "Uracil variant {name}");
+        }
+    }
+
+    #[test]
+    fn structure_color_thymine_variants() {
+        let scheme = ColorScheme::new(ColorSchemeType::Structure, 100);
+        let expected = Color::Rgb(60, 60, 220);
+
+        for name in &["T", "DT"] {
+            let r = make_residue(name, SecondaryStructure::Coil);
+            assert_eq!(scheme.structure_color(&r), expected, "Thymine variant {name}");
+        }
+    }
+
+    #[test]
+    fn structure_color_guanine_variants() {
+        let scheme = ColorScheme::new(ColorSchemeType::Structure, 100);
+        let expected = Color::Rgb(60, 180, 60);
+
+        for name in &["G", "DG", "GMP"] {
+            let r = make_residue(name, SecondaryStructure::Coil);
+            assert_eq!(scheme.structure_color(&r), expected, "Guanine variant {name}");
+        }
+    }
+
+    #[test]
+    fn structure_color_cytosine_variants() {
+        let scheme = ColorScheme::new(ColorSchemeType::Structure, 100);
+        let expected = Color::Rgb(220, 200, 40);
+
+        for name in &["C", "DC", "CMP"] {
+            let r = make_residue(name, SecondaryStructure::Coil);
+            assert_eq!(scheme.structure_color(&r), expected, "Cytosine variant {name}");
+        }
+    }
+
+    // ---- structure_color: protein residues still get secondary-structure colors ----
+
+    #[test]
+    fn structure_color_protein_helix() {
+        let scheme = ColorScheme::new(ColorSchemeType::Structure, 100);
+        let r = make_residue("ALA", SecondaryStructure::Helix);
+        assert_eq!(scheme.structure_color(&r), Color::Rgb(255, 0, 128));
+    }
+
+    #[test]
+    fn structure_color_protein_sheet() {
+        let scheme = ColorScheme::new(ColorSchemeType::Structure, 100);
+        let r = make_residue("GLY", SecondaryStructure::Sheet);
+        assert_eq!(scheme.structure_color(&r), Color::Rgb(255, 200, 0));
+    }
+
+    #[test]
+    fn structure_color_protein_turn() {
+        let scheme = ColorScheme::new(ColorSchemeType::Structure, 100);
+        let r = make_residue("CYS", SecondaryStructure::Turn);
+        assert_eq!(scheme.structure_color(&r), Color::Rgb(96, 128, 255));
+    }
+
+    #[test]
+    fn structure_color_protein_coil() {
+        let scheme = ColorScheme::new(ColorSchemeType::Structure, 100);
+        let r = make_residue("LEU", SecondaryStructure::Coil);
+        assert_eq!(scheme.structure_color(&r), Color::Rgb(0, 204, 0));
+    }
 }

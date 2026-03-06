@@ -243,7 +243,7 @@ impl InterfaceAnalysis {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::protein::{Atom, Chain, Protein, Residue, SecondaryStructure};
+    use crate::model::protein::{Atom, Chain, MoleculeType, Protein, Residue, SecondaryStructure};
 
     /// Helper: make a single-atom residue at the given position.
     fn make_residue(name: &str, seq_num: i32, x: f64, y: f64, z: f64) -> Residue {
@@ -257,7 +257,7 @@ mod tests {
                 y,
                 z,
                 b_factor: 0.0,
-                is_ca: true,
+                is_backbone: true,
             }],
             secondary_structure: SecondaryStructure::Coil,
         }
@@ -273,6 +273,7 @@ mod tests {
                         make_residue("ALA", 1, 0.0, 0.0, 0.0),
                         make_residue("GLY", 2, 10.0, 0.0, 0.0), // far away
                     ],
+                    molecule_type: MoleculeType::Protein,
                 },
                 Chain {
                     id: "B".to_string(),
@@ -280,6 +281,7 @@ mod tests {
                         make_residue("ASP", 1, 3.0, 0.0, 0.0), // within 4.5 of A:ALA1
                         make_residue("LEU", 2, 20.0, 0.0, 0.0), // far away
                     ],
+                    molecule_type: MoleculeType::Protein,
                 },
             ],
         }
@@ -351,10 +353,11 @@ mod tests {
                             y: 0.0,
                             z: 0.0,
                             b_factor: 0.0,
-                            is_ca: false,
+                            is_backbone: false,
                         }],
                         secondary_structure: SecondaryStructure::Coil,
                     }],
+                    molecule_type: MoleculeType::Protein,
                 },
                 Chain {
                     id: "B".to_string(),
@@ -368,10 +371,11 @@ mod tests {
                             y: 0.0,
                             z: 0.0,
                             b_factor: 0.0,
-                            is_ca: false,
+                            is_backbone: false,
                         }],
                         secondary_structure: SecondaryStructure::Coil,
                     }],
+                    molecule_type: MoleculeType::Protein,
                 },
             ],
         };

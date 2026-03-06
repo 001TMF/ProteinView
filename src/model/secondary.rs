@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_assign_from_cif_file_sets_secondary_structure() {
-        use crate::model::protein::{Protein, Chain, Residue, Atom};
+        use crate::model::protein::{Protein, Chain, MoleculeType, Residue, Atom};
 
         // Build a minimal protein matching 1ZVH chain L residues 1-20
         let mut residues = Vec::new();
@@ -457,14 +457,14 @@ mod tests {
                     element: "C".to_string(),
                     x: 0.0, y: 0.0, z: 0.0,
                     b_factor: 0.0,
-                    is_ca: true,
+                    is_backbone: true,
                 }],
                 secondary_structure: SecondaryStructure::Coil,
             });
         }
         let mut protein = Protein {
             name: "test".to_string(),
-            chains: vec![Chain { id: "L".to_string(), residues }],
+            chains: vec![Chain { id: "L".to_string(), residues, molecule_type: MoleculeType::Protein }],
         };
 
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/1ZVH.cif");

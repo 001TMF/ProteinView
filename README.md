@@ -47,6 +47,14 @@ Terminal protein structure viewer -- load, rotate, and explore PDB/CIF structure
 
 ## Installation
 
+Easy install via pip for x86 (for arm, it will try to build it on your machine using maturin)
+
+```bash
+pip install proteinview
+```
+
+or build it here from source
+
 ```bash
 # Basic install
 cargo install --path .

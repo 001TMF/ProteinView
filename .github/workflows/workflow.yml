@@ -37,19 +37,12 @@ jobs:
           fi
 
   build-linux-wheels:
-    name: Build Linux wheels (${{ matrix.target }})
+    name: Build Linux wheels (x86_64)
     needs: check-version
     if: needs.check-version.outputs.should_publish == 'true'
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
-    strategy:
-      matrix:
-        include:
-          - target: x86_64
-            runner: ubuntu-24.04
-          - target: aarch64
-            runner: ubuntu-24.04-arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -60,9 +53,15 @@ jobs:
       - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
-          target: ${{ matrix.target }}
+          target: x86_64
           args: --release --out dist
           manylinux: auto
+
+      - name: Build source distribution
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4

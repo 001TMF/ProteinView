@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1,<2"]
+build-backend = "maturin"
+
+[project]
+name = "proteinview"
+requires-python = ">=3.8"
+description = "Terminal protein structure viewer"
+license = { text = "MIT" }
+authors = [{ name = "Tristan Farmer" }]
+keywords = ["protein", "pdb", "terminal", "tui", "bioinformatics"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "License :: OSI Approved :: MIT License",
+]
+readme = "README.md"
+
+[tool.maturin]
+# Package the Rust binary into the wheel as a console script
+binaries = ["proteinview"]

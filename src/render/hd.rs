@@ -32,13 +32,14 @@ pub fn render_hd_framebuffer(
     match viz_mode {
         VizMode::Cartoon => {
             let adaptive_mesh = generate_ribbon_mesh_adaptive(protein, color_scheme, camera);
+            let mut screen_tris = Vec::with_capacity(adaptive_mesh.len());
             for tri in &adaptive_mesh {
                 let v0 = camera.project(tri.verts[0][0], tri.verts[0][1], tri.verts[0][2]);
                 let v1 = camera.project(tri.verts[1][0], tri.verts[1][1], tri.verts[1][2]);
                 let v2 = camera.project(tri.verts[2][0], tri.verts[2][1], tri.verts[2][2]);
                 let rotated_normal =
                     rotate_normal(camera, tri.normal[0], tri.normal[1], tri.normal[2]);
-                let screen_tri = Triangle {
+                screen_tris.push(Triangle {
                     verts: [
                         to_pixel(v0.x, v0.y, v0.z, half_w, half_h),
                         to_pixel(v1.x, v1.y, v1.z, half_w, half_h),
@@ -46,9 +47,9 @@ pub fn render_hd_framebuffer(
                     ],
                     color: tri.color,
                     normal: rotated_normal,
-                };
-                fb.rasterize_triangle_depth(&screen_tri, light_dir);
+                });
             }
+            fb.rasterize_triangles_tiled(&screen_tris, light_dir);
         }
         VizMode::Backbone => {
             render_backbone_fb(&mut fb, protein, camera, color_scheme, half_w, half_h);

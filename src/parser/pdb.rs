@@ -1,7 +1,9 @@
 use crate::model::protein::{
     Atom, Chain, DNA_RESIDUES, MoleculeType, Protein, RNA_RESIDUES, Residue, SecondaryStructure,
 };
-use crate::model::secondary::{assign_from_cif_file, assign_from_pdb_file};
+use crate::model::secondary::{
+    assign_from_cif_file, assign_from_pdb_file, infer_protein_secondary_structure,
+};
 use anyhow::Result;
 
 /// Load a protein structure from a PDB or mmCIF file
@@ -72,6 +74,8 @@ pub fn load_structure(path: &str) -> Result<Protein> {
             assign_from_cif_file(&mut protein, path);
         }
     }
+
+    infer_protein_secondary_structure(&mut protein);
 
     Ok(protein)
 }

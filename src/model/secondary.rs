@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
-use crate::model::protein::{Protein, SecondaryStructure};
+use crate::model::protein::{MoleculeType, Protein, SecondaryStructure};
 
 /// A secondary structure range parsed from PDB HELIX/SHEET records or CIF categories.
 #[derive(Debug, Clone)]
@@ -425,9 +425,158 @@ pub fn assign_from_cif_file(protein: &mut Protein, file_path: &str) {
     apply_ss_ranges(protein, &ranges);
 }
 
+/// Infer protein secondary structure directly from backbone geometry.
+///
+/// This is a fallback for structures such as AlphaFold/AlphaFold3 PDBs that
+/// often omit HELIX/SHEET records entirely. We use phi/psi torsion angle
+/// windows and keep only contiguous runs long enough to look like real
+/// helices/sheets in the cartoon renderer.
+pub fn infer_protein_secondary_structure(protein: &mut Protein) {
+    for chain in &mut protein.chains {
+        if chain.molecule_type != MoleculeType::Protein {
+            continue;
+        }
+
+        let has_existing_ss = chain
+            .residues
+            .iter()
+            .any(|r| r.secondary_structure != SecondaryStructure::Coil);
+        if has_existing_ss {
+            continue;
+        }
+
+        let inferred = infer_chain_secondary_structure(&chain.residues);
+        for (residue, ss) in chain.residues.iter_mut().zip(inferred) {
+            residue.secondary_structure = ss;
+        }
+    }
+}
+
+fn infer_chain_secondary_structure(
+    residues: &[crate::model::protein::Residue],
+) -> Vec<SecondaryStructure> {
+    let mut assignments = vec![SecondaryStructure::Coil; residues.len()];
+
+    for i in 1..residues.len().saturating_sub(1) {
+        let c_prev = atom_pos(&residues[i - 1], "C");
+        let n = atom_pos(&residues[i], "N");
+        let ca = atom_pos(&residues[i], "CA");
+        let c = atom_pos(&residues[i], "C");
+        let n_next = atom_pos(&residues[i + 1], "N");
+
+        let (Some(c_prev), Some(n), Some(ca), Some(c), Some(n_next)) = (c_prev, n, ca, c, n_next)
+        else {
+            continue;
+        };
+
+        let phi = dihedral(c_prev, n, ca, c);
+        let psi = dihedral(n, ca, c, n_next);
+
+        if is_helix_torsion(phi, psi) {
+            assignments[i] = SecondaryStructure::Helix;
+        } else if is_sheet_torsion(phi, psi) {
+            assignments[i] = SecondaryStructure::Sheet;
+        }
+    }
+
+    retain_runs(&mut assignments, SecondaryStructure::Helix, 4);
+    retain_runs(&mut assignments, SecondaryStructure::Sheet, 3);
+    assignments
+}
+
+fn atom_pos(residue: &crate::model::protein::Residue, atom_name: &str) -> Option<[f64; 3]> {
+    residue
+        .atoms
+        .iter()
+        .find(|atom| atom.name == atom_name)
+        .map(|atom| [atom.x, atom.y, atom.z])
+}
+
+fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn norm(v: [f64; 3]) -> f64 {
+    dot(v, v).sqrt()
+}
+
+fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {
+    let len = norm(v);
+    if len < 1e-8 {
+        None
+    } else {
+        Some([v[0] / len, v[1] / len, v[2] / len])
+    }
+}
+
+fn dihedral(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3]) -> f64 {
+    let b0 = sub(a, b);
+    let b1 = sub(c, b);
+    let b2 = sub(d, c);
+
+    let Some(b1_unit) = normalize(b1) else {
+        return 0.0;
+    };
+
+    let n0 = cross(b0, b1);
+    let n1 = cross(b1, b2);
+    let Some(n0_unit) = normalize(n0) else {
+        return 0.0;
+    };
+    let Some(n1_unit) = normalize(n1) else {
+        return 0.0;
+    };
+
+    let m1 = cross(n0_unit, b1_unit);
+    dot(m1, n1_unit).atan2(dot(n0_unit, n1_unit)).to_degrees()
+}
+
+fn is_helix_torsion(phi: f64, psi: f64) -> bool {
+    (-140.0..=-80.0).contains(&phi) && (-170.0..=-100.0).contains(&psi)
+}
+
+fn is_sheet_torsion(phi: f64, psi: f64) -> bool {
+    ((-100.0..=-40.0).contains(&phi) && (20.0..=90.0).contains(&psi))
+        || ((80.0..=180.0).contains(&phi) && (120.0..=180.0).contains(&psi))
+}
+
+fn retain_runs(assignments: &mut [SecondaryStructure], ss: SecondaryStructure, min_len: usize) {
+    let mut i = 0;
+    while i < assignments.len() {
+        if assignments[i] != ss {
+            i += 1;
+            continue;
+        }
+
+        let start = i;
+        while i < assignments.len() && assignments[i] == ss {
+            i += 1;
+        }
+
+        if i - start < min_len {
+            for state in &mut assignments[start..i] {
+                *state = SecondaryStructure::Coil;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::pdb::load_structure;
 
     #[test]
     fn test_tokenize_cif_line_basic() {
@@ -620,5 +769,47 @@ mod tests {
 
         assert!(helix_count > 0, "Expected helix residues, got 0");
         assert!(sheet_count > 0, "Expected sheet residues, got 0");
+    }
+
+    #[test]
+    fn test_infer_secondary_structure_for_alphafold_pdb() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/AF3_TNFa.pdb");
+        let protein = load_structure(path).unwrap();
+
+        let helix_count = protein
+            .chains
+            .iter()
+            .flat_map(|c| &c.residues)
+            .filter(|r| r.secondary_structure == SecondaryStructure::Helix)
+            .count();
+        let sheet_count = protein
+            .chains
+            .iter()
+            .flat_map(|c| &c.residues)
+            .filter(|r| r.secondary_structure == SecondaryStructure::Sheet)
+            .count();
+        let structured_count = helix_count + sheet_count;
+
+        assert!(
+            helix_count > 0,
+            "expected inferred helices for AF3_TNFa.pdb"
+        );
+        assert!(
+            structured_count > 0,
+            "expected inferred secondary structure for AF3_TNFa.pdb"
+        );
+    }
+
+    #[test]
+    fn test_explicit_pdb_secondary_structure_still_used() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/1UBQ.pdb");
+        let protein = load_structure(path).unwrap();
+        let chain = &protein.chains[0];
+
+        let residue_10 = chain.residues.iter().find(|r| r.seq_num == 10).unwrap();
+        let residue_23 = chain.residues.iter().find(|r| r.seq_num == 23).unwrap();
+
+        assert_eq!(residue_10.secondary_structure, SecondaryStructure::Sheet);
+        assert_eq!(residue_23.secondary_structure, SecondaryStructure::Helix);
     }
 }

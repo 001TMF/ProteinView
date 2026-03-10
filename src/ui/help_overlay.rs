@@ -25,11 +25,11 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from(vec![
             Span::styled("  h / l      ", Style::default().fg(Color::Yellow)),
-            Span::raw("Rotate Y-axis"),
+            Span::raw("Rotate Y-axis (left/right swapped)"),
         ]),
         Line::from(vec![
             Span::styled("  j / k      ", Style::default().fg(Color::Yellow)),
-            Span::raw("Rotate X-axis"),
+            Span::raw("Rotate X-axis (up/down swapped)"),
         ]),
         Line::from(vec![
             Span::styled("  u / i      ", Style::default().fg(Color::Yellow)),

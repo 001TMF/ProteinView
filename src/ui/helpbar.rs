@@ -23,6 +23,13 @@ pub fn render_helpbar(frame: &mut Frame, area: Rect) {
         ),
         Span::styled(": rotX  ", Style::default().fg(Color::Gray)),
         Span::styled(
+            "u/i",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(": roll  ", Style::default().fg(Color::Gray)),
+        Span::styled(
             "+/-",
             Style::default()
                 .fg(Color::Cyan)

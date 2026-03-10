@@ -6,6 +6,10 @@ use crate::render::framebuffer::{Framebuffer, Triangle, default_light_dir};
 use crate::render::ribbon::generate_ribbon_mesh_adaptive;
 
 const LIGAND_STICK_COLOR_RGB: [u8; 3] = [0, 255, 255];
+const LIGAND_ATOM_RADIUS_PX: f64 = 9.0;
+const LIGAND_BOND_THICKNESS_PX: f64 = 18.0;
+const LIGAND_ATOM_RADIUS_PX_BRAILLE: f64 = 1.8;
+const LIGAND_BOND_THICKNESS_PX_BRAILLE: f64 = 1.8;
 
 /// Render the protein into a raw [`Framebuffer`] at the given pixel dimensions.
 ///
@@ -53,15 +57,15 @@ pub fn render_hd_framebuffer(
                 });
             }
             fb.rasterize_triangles_tiled(&screen_tris, light_dir);
-            render_ligand_sticks_fb(&mut fb, protein, camera, half_w, half_h);
+            render_ligand_sticks_fb(&mut fb, protein, camera, half_w, half_h, is_hd_output);
         }
         VizMode::Backbone => {
             render_backbone_fb(&mut fb, protein, camera, color_scheme, half_w, half_h);
-            render_ligand_sticks_fb(&mut fb, protein, camera, half_w, half_h);
+            render_ligand_sticks_fb(&mut fb, protein, camera, half_w, half_h, is_hd_output);
         }
         VizMode::Wireframe => {
             render_wireframe_fb(&mut fb, protein, camera, color_scheme, half_w, half_h);
-            render_ligand_sticks_fb(&mut fb, protein, camera, half_w, half_h);
+            render_ligand_sticks_fb(&mut fb, protein, camera, half_w, half_h, is_hd_output);
         }
     }
 
@@ -267,7 +271,19 @@ fn render_ligand_sticks_fb(
     camera: &Camera,
     half_w: f64,
     half_h: f64,
+    is_hd_output: bool,
 ) {
+    let atom_radius = if is_hd_output {
+        LIGAND_ATOM_RADIUS_PX
+    } else {
+        LIGAND_ATOM_RADIUS_PX_BRAILLE
+    };
+    let bond_thickness = if is_hd_output {
+        LIGAND_BOND_THICKNESS_PX
+    } else {
+        LIGAND_BOND_THICKNESS_PX_BRAILLE
+    };
+
     for chain in &protein.chains {
         for residue in &chain.residues {
             if !is_ligand_residue(residue) {
@@ -285,7 +301,7 @@ fn render_ligand_sticks_fb(
                 .collect();
 
             for (_, px) in &projected {
-                fb.draw_circle_z(px[0], px[1], px[2], 1.8, LIGAND_STICK_COLOR_RGB);
+                fb.draw_circle_z(px[0], px[1], px[2], atom_radius, LIGAND_STICK_COLOR_RGB);
             }
 
             for i in 0..projected.len() {
@@ -293,7 +309,7 @@ fn render_ligand_sticks_fb(
                     let (a1, p1) = &projected[i];
                     let (a2, p2) = &projected[j];
                     if atoms_bonded_3d(a1.x, a1.y, a1.z, a2.x, a2.y, a2.z) {
-                        fb.draw_thick_line_3d(*p1, *p2, LIGAND_STICK_COLOR_RGB, 1.8);
+                        fb.draw_thick_line_3d(*p1, *p2, LIGAND_STICK_COLOR_RGB, bond_thickness);
                     }
                 }
             }

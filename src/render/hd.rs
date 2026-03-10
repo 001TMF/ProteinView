@@ -3,7 +3,7 @@ use crate::model::protein::{MoleculeType, Protein};
 use crate::render::camera::Camera;
 use crate::render::color::{ColorScheme, color_to_rgb};
 use crate::render::framebuffer::{Framebuffer, Triangle, default_light_dir};
-use crate::render::ribbon::RibbonTriangle;
+use crate::render::ribbon::generate_ribbon_mesh_adaptive;
 
 /// Render the protein into a raw [`Framebuffer`] at the given pixel dimensions.
 ///
@@ -17,7 +17,6 @@ pub fn render_hd_framebuffer(
     viz_mode: VizMode,
     width: f64,
     height: f64,
-    mesh: &[RibbonTriangle],
 ) -> Framebuffer {
     let px_w = width as usize;
     let px_h = height as usize;
@@ -32,7 +31,8 @@ pub fn render_hd_framebuffer(
 
     match viz_mode {
         VizMode::Cartoon => {
-            for tri in mesh {
+            let adaptive_mesh = generate_ribbon_mesh_adaptive(protein, color_scheme, camera);
+            for tri in &adaptive_mesh {
                 let v0 = camera.project(tri.verts[0][0], tri.verts[0][1], tri.verts[0][2]);
                 let v1 = camera.project(tri.verts[1][0], tri.verts[1][1], tri.verts[1][2]);
                 let v2 = camera.project(tri.verts[2][0], tri.verts[2][1], tri.verts[2][2]);

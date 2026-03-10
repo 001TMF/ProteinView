@@ -4,7 +4,6 @@ use crate::model::interface::{InterfaceAnalysis, analyze_interface};
 use crate::model::protein::Protein;
 use crate::render::camera::Camera;
 use crate::render::color::{ColorScheme, ColorSchemeType};
-use crate::render::ribbon::{RibbonTriangle, generate_ribbon_mesh};
 
 /// Visualization mode
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -53,9 +52,6 @@ pub struct App {
     pub show_interface: bool,
     pub interface_analysis: InterfaceAnalysis,
     pub should_quit: bool,
-    /// Cached ribbon mesh — regenerated only when color scheme changes.
-    pub mesh_cache: Vec<RibbonTriangle>,
-    mesh_dirty: bool,
     /// ratatui-image protocol picker for Sixel/Kitty/iTerm2 graphics.
     pub picker: Picker,
 }
@@ -102,8 +98,6 @@ impl App {
         let interface_analysis = analyze_interface(&protein, 4.5);
 
         let color_scheme = ColorScheme::new(ColorSchemeType::Structure, total_residues);
-        let mesh_cache = generate_ribbon_mesh(&protein, &color_scheme);
-
         Self {
             protein,
             camera,
@@ -115,8 +109,6 @@ impl App {
             show_interface: false,
             interface_analysis,
             should_quit: false,
-            mesh_cache,
-            mesh_dirty: false,
             picker,
         }
     }
@@ -124,7 +116,6 @@ impl App {
     pub fn cycle_color(&mut self) {
         let next = self.color_scheme.scheme_type.next();
         self.color_scheme = ColorScheme::new(next, self.protein.residue_count());
-        self.mesh_dirty = true;
     }
 
     pub fn cycle_viz_mode(&mut self) {
@@ -138,7 +129,6 @@ impl App {
             &self.interface_analysis,
             &self.protein,
         );
-        self.mesh_dirty = true;
     }
 
     pub fn toggle_interface(&mut self) {
@@ -148,17 +138,7 @@ impl App {
         } else {
             self.color_scheme =
                 ColorScheme::new(ColorSchemeType::Structure, self.protein.residue_count());
-            self.mesh_dirty = true;
         }
-    }
-
-    /// Get the cached ribbon mesh, regenerating if dirty.
-    pub fn ribbon_mesh(&mut self) -> &[RibbonTriangle] {
-        if self.mesh_dirty {
-            self.mesh_cache = generate_ribbon_mesh(&self.protein, &self.color_scheme);
-            self.mesh_dirty = false;
-        }
-        &self.mesh_cache
     }
 
     pub fn next_chain(&mut self) {

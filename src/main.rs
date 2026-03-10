@@ -201,10 +201,6 @@ fn main() -> Result<()> {
             break;
         }
 
-        // Ensure ribbon mesh cache is fresh (rebuilds only when color scheme changes).
-        // Must happen outside terminal.draw() since ribbon_mesh() needs &mut self.
-        app.ribbon_mesh();
-
         // Adaptive frame skipping: if the previous draw took longer than the
         // tick rate, skip frames proportionally.  User input always forces a
         // redraw so the UI stays responsive.

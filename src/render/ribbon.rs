@@ -10,6 +10,7 @@
 //! The output mesh is in world space; the caller projects through the camera.
 
 use crate::model::protein::{MoleculeType, Protein, SecondaryStructure, is_purine};
+use crate::render::camera::Camera;
 use crate::render::color::{ColorScheme, color_to_rgb};
 
 // ---------------------------------------------------------------------------
@@ -18,6 +19,15 @@ use crate::render::color::{ColorScheme, color_to_rgb};
 
 /// Number of spline subdivisions between each pair of C-alpha atoms.
 const SPLINE_SUBDIVISIONS: usize = 14;
+
+/// Maximum projected chord length for a single adaptive spline span.
+const ADAPTIVE_MAX_CHORD_PX: f64 = 12.0;
+
+/// Maximum midpoint deviation before a spline span is subdivided further.
+const ADAPTIVE_MAX_CURVE_ERROR_PX: f64 = 0.75;
+
+/// Hard cap on recursive adaptive subdivision.
+const ADAPTIVE_MAX_DEPTH: usize = 8;
 
 /// Number of vertices around the coil/turn tube cross-section.
 const COIL_SEGMENTS: usize = 12;
@@ -150,6 +160,10 @@ struct SplinePoint {
 /// surface is a flat band.  For coils we return `COIL_SEGMENTS` points in a
 /// circle.
 fn cross_section(sp: &SplinePoint) -> Vec<V3> {
+    cross_section_with_coil_segments(sp, COIL_SEGMENTS)
+}
+
+fn cross_section_with_coil_segments(sp: &SplinePoint, coil_segments: usize) -> Vec<V3> {
     match sp.ss {
         SecondaryStructure::Helix => ribbon_cross_section(sp, HELIX_HALF_WIDTH, HELIX_HALF_HEIGHT),
         SecondaryStructure::Sheet => {
@@ -163,7 +177,9 @@ fn cross_section(sp: &SplinePoint) -> Vec<V3> {
             };
             ribbon_cross_section(sp, hw, SHEET_HALF_HEIGHT)
         }
-        SecondaryStructure::Turn | SecondaryStructure::Coil => coil_cross_section(sp),
+        SecondaryStructure::Turn | SecondaryStructure::Coil => {
+            coil_cross_section(sp, coil_segments)
+        }
     }
 }
 
@@ -183,12 +199,12 @@ fn ribbon_cross_section(sp: &SplinePoint, half_w: f64, half_h: f64) -> Vec<V3> {
 }
 
 /// Circular tube cross-section for coil/turn regions.
-fn coil_cross_section(sp: &SplinePoint) -> Vec<V3> {
+fn coil_cross_section(sp: &SplinePoint, segments: usize) -> Vec<V3> {
     let n = sp.normal;
     let b = sp.binormal;
-    let mut pts = Vec::with_capacity(COIL_SEGMENTS);
-    for i in 0..COIL_SEGMENTS {
-        let angle = 2.0 * std::f64::consts::PI * (i as f64) / (COIL_SEGMENTS as f64);
+    let mut pts = Vec::with_capacity(segments);
+    for i in 0..segments {
+        let angle = 2.0 * std::f64::consts::PI * (i as f64) / (segments as f64);
         let (sin_a, cos_a) = angle.sin_cos();
         let offset = v3_add(
             v3_scale(n, cos_a * COIL_RADIUS),
@@ -207,6 +223,99 @@ fn triangle_normal(v0: V3, v1: V3, v2: V3) -> V3 {
     let e1 = v3_sub(v1, v0);
     let e2 = v3_sub(v2, v0);
     v3_normalize(v3_cross(e1, e2))
+}
+
+#[derive(Clone, Copy)]
+struct SegmentSample {
+    pos: V3,
+    ss: SecondaryStructure,
+    color: [u8; 3],
+    arrow_t: Option<f64>,
+}
+
+#[inline]
+fn adaptive_coil_segments(camera: &Camera) -> usize {
+    let projected_radius = (COIL_RADIUS * camera.zoom).abs();
+    if projected_radius < 1.5 {
+        4
+    } else if projected_radius < 3.0 {
+        6
+    } else if projected_radius < 5.0 {
+        8
+    } else if projected_radius < 8.0 {
+        10
+    } else {
+        COIL_SEGMENTS
+    }
+}
+
+fn adaptive_segment_needs_split(
+    camera: &Camera,
+    start: &SegmentSample,
+    mid: &SegmentSample,
+    end: &SegmentSample,
+) -> bool {
+    let p0 = camera.project(start.pos[0], start.pos[1], start.pos[2]);
+    let pm = camera.project(mid.pos[0], mid.pos[1], mid.pos[2]);
+    let p1 = camera.project(end.pos[0], end.pos[1], end.pos[2]);
+
+    let chord_dx = p1.x - p0.x;
+    let chord_dy = p1.y - p0.y;
+    let chord_len = (chord_dx * chord_dx + chord_dy * chord_dy).sqrt();
+    if chord_len > ADAPTIVE_MAX_CHORD_PX {
+        return true;
+    }
+
+    let mid_x = (p0.x + p1.x) * 0.5;
+    let mid_y = (p0.y + p1.y) * 0.5;
+    let err_x = pm.x - mid_x;
+    let err_y = pm.y - mid_y;
+    (err_x * err_x + err_y * err_y).sqrt() > ADAPTIVE_MAX_CURVE_ERROR_PX
+}
+
+fn append_spline_point(out: &mut Vec<SplinePoint>, sample: SegmentSample) {
+    let should_push = out
+        .last()
+        .map(|last| v3_len(v3_sub(last.pos, sample.pos)) > 1e-9)
+        .unwrap_or(true);
+    if !should_push {
+        return;
+    }
+
+    out.push(SplinePoint {
+        pos: sample.pos,
+        tangent: [0.0, 0.0, 0.0],
+        normal: [0.0, 1.0, 0.0],
+        binormal: [0.0, 0.0, 1.0],
+        ss: sample.ss,
+        color: sample.color,
+        arrow_t: sample.arrow_t,
+    });
+}
+
+fn subdivide_segment(
+    camera: &Camera,
+    sample_at: &impl Fn(f64) -> SegmentSample,
+    out: &mut Vec<SplinePoint>,
+    t0: f64,
+    s0: SegmentSample,
+    t1: f64,
+    s1: SegmentSample,
+    depth: usize,
+) {
+    let tm = (t0 + t1) * 0.5;
+    let sm = sample_at(tm);
+    let should_split =
+        depth < ADAPTIVE_MAX_DEPTH && adaptive_segment_needs_split(camera, &s0, &sm, &s1);
+
+    if should_split {
+        subdivide_segment(camera, sample_at, out, t0, s0, tm, sm, depth + 1);
+        subdivide_segment(camera, sample_at, out, tm, sm, t1, s1, depth + 1);
+        return;
+    }
+
+    append_spline_point(out, s0);
+    append_spline_point(out, s1);
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +421,92 @@ fn resample_ring(ring: &[V3], target_count: usize) -> Vec<V3> {
     out
 }
 
+fn compute_frames(spline_points: &mut [SplinePoint]) {
+    if spline_points.len() < 2 {
+        return;
+    }
+
+    let sp_len = spline_points.len();
+    for i in 0..sp_len {
+        let prev = if i == 0 { 0 } else { i - 1 };
+        let next = if i == sp_len - 1 { sp_len - 1 } else { i + 1 };
+        let tangent = v3_normalize(v3_sub(spline_points[next].pos, spline_points[prev].pos));
+        spline_points[i].tangent = tangent;
+    }
+
+    let t0 = spline_points[0].tangent;
+    let arbitrary = if t0[0].abs() < 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let mut prev_normal = v3_normalize(v3_cross(t0, arbitrary));
+
+    for sp in spline_points.iter_mut() {
+        let t = sp.tangent;
+        let proj = v3_scale(t, v3_dot(prev_normal, t));
+        let mut normal = v3_sub(prev_normal, proj);
+        let normal_len = v3_len(normal);
+        if normal_len < 1e-12 {
+            let arb = if t[0].abs() < 0.9 {
+                [1.0, 0.0, 0.0]
+            } else {
+                [0.0, 1.0, 0.0]
+            };
+            normal = v3_normalize(v3_cross(t, arb));
+        } else {
+            normal = v3_scale(normal, 1.0 / normal_len);
+        }
+        let binormal = v3_normalize(v3_cross(t, normal));
+        sp.normal = normal;
+        sp.binormal = binormal;
+        prev_normal = normal;
+    }
+}
+
+fn emit_spline_surface(
+    spline_points: &[SplinePoint],
+    out: &mut Vec<RibbonTriangle>,
+    coil_segments: usize,
+) {
+    if spline_points.len() < 2 {
+        return;
+    }
+
+    let mut prev_ring = cross_section_with_coil_segments(&spline_points[0], coil_segments);
+
+    for sp in spline_points.iter().skip(1) {
+        let mut curr_ring = cross_section_with_coil_segments(sp, coil_segments);
+        let color = sp.color;
+
+        if prev_ring.len() != curr_ring.len() {
+            let target = prev_ring.len().max(curr_ring.len());
+            if prev_ring.len() != target {
+                prev_ring = resample_ring(&prev_ring, target);
+            }
+            if curr_ring.len() != target {
+                curr_ring = resample_ring(&curr_ring, target);
+            }
+        }
+
+        emit_strip(&prev_ring, &curr_ring, color, out);
+        prev_ring = curr_ring;
+    }
+
+    let first_ring = cross_section_with_coil_segments(&spline_points[0], coil_segments);
+    emit_cap(
+        &first_ring,
+        spline_points[0].pos,
+        spline_points[0].color,
+        false,
+        out,
+    );
+
+    let last = spline_points.last().unwrap();
+    let last_ring = cross_section_with_coil_segments(last, coil_segments);
+    emit_cap(&last_ring, last.pos, last.color, true, out);
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -320,6 +515,7 @@ fn resample_ring(ring: &[V3], target_count: usize) -> Vec<V3> {
 ///
 /// The returned triangles are in world space.  The caller should project each
 /// vertex through the camera and then rasterize.
+#[allow(dead_code)]
 pub fn generate_ribbon_mesh(protein: &Protein, color_scheme: &ColorScheme) -> Vec<RibbonTriangle> {
     let mut triangles: Vec<RibbonTriangle> = Vec::new();
 
@@ -327,6 +523,28 @@ pub fn generate_ribbon_mesh(protein: &Protein, color_scheme: &ColorScheme) -> Ve
         match chain.molecule_type {
             MoleculeType::Protein => {
                 generate_chain_ribbon(chain, color_scheme, &mut triangles);
+            }
+            MoleculeType::RNA | MoleculeType::DNA => {
+                generate_nucleic_acid_ribbon(chain, color_scheme, &mut triangles);
+            }
+        }
+    }
+
+    triangles
+}
+
+/// Generate a cartoon mesh with camera-dependent adaptive tessellation.
+pub fn generate_ribbon_mesh_adaptive(
+    protein: &Protein,
+    color_scheme: &ColorScheme,
+    camera: &Camera,
+) -> Vec<RibbonTriangle> {
+    let mut triangles: Vec<RibbonTriangle> = Vec::new();
+
+    for chain in &protein.chains {
+        match chain.molecule_type {
+            MoleculeType::Protein => {
+                generate_chain_ribbon_adaptive(chain, color_scheme, camera, &mut triangles);
             }
             MoleculeType::RNA | MoleculeType::DNA => {
                 generate_nucleic_acid_ribbon(chain, color_scheme, &mut triangles);
@@ -501,6 +719,30 @@ fn build_spline_tube(records: &[CaRecord], out: &mut Vec<RibbonTriangle>) {
     );
 }
 
+fn arrow_fraction(cas: &[CaRecord], arrow_start: &[usize], seg: usize, t: f64) -> Option<f64> {
+    let n = cas.len();
+    arrow_start.iter().find_map(|&astart| {
+        let mut aend = astart;
+        while aend < n && cas[aend].ss == SecondaryStructure::Sheet {
+            aend += 1;
+        }
+        if aend == astart {
+            return None;
+        }
+
+        let global_pos = seg as f64 + t;
+        let arrow_begin = astart as f64;
+        let arrow_end = aend as f64;
+        if global_pos >= arrow_begin && global_pos <= arrow_end {
+            let frac = (global_pos - arrow_begin) / (arrow_end - arrow_begin);
+            Some(frac.clamp(0.0, 1.0))
+        } else {
+            None
+        }
+    })
+}
+
+#[allow(dead_code)]
 fn generate_chain_ribbon(
     chain: &crate::model::protein::Chain,
     color_scheme: &ColorScheme,
@@ -723,6 +965,94 @@ fn generate_chain_ribbon(
         true,
         out,
     );
+}
+
+fn generate_chain_ribbon_adaptive(
+    chain: &crate::model::protein::Chain,
+    color_scheme: &ColorScheme,
+    camera: &Camera,
+    out: &mut Vec<RibbonTriangle>,
+) {
+    let cas: Vec<CaRecord> = chain
+        .residues
+        .iter()
+        .filter_map(|res| {
+            let ca = res.atoms.iter().find(|a| a.is_backbone)?;
+            let color = color_to_rgb(color_scheme.residue_color(res, chain));
+            Some(CaRecord {
+                pos: [ca.x, ca.y, ca.z],
+                ss: res.secondary_structure,
+                color,
+            })
+        })
+        .collect();
+
+    let n = cas.len();
+    if n < 2 {
+        return;
+    }
+
+    let mut arrow_start: Vec<usize> = Vec::new();
+    {
+        let mut i = 0;
+        while i < n {
+            if cas[i].ss == SecondaryStructure::Sheet {
+                let run_start = i;
+                while i < n && cas[i].ss == SecondaryStructure::Sheet {
+                    i += 1;
+                }
+                let run_end = i;
+                let run_len = run_end - run_start;
+                let arrow_residues = run_len.min(2);
+                arrow_start.push(run_end - arrow_residues);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    let mut spline_points: Vec<SplinePoint> = Vec::new();
+
+    for seg in 0..n - 1 {
+        let i0 = if seg == 0 { 0 } else { seg - 1 };
+        let i1 = seg;
+        let i2 = seg + 1;
+        let i3 = if seg + 2 >= n { n - 1 } else { seg + 2 };
+
+        let p0 = cas[i0].pos;
+        let p1 = cas[i1].pos;
+        let p2 = cas[i2].pos;
+        let p3 = cas[i3].pos;
+
+        let sample_at = |t: f64| SegmentSample {
+            pos: catmull_rom(p0, p1, p2, p3, t),
+            ss: if t < 0.5 { cas[i1].ss } else { cas[i2].ss },
+            color: if t < 0.5 {
+                cas[i1].color
+            } else {
+                cas[i2].color
+            },
+            arrow_t: arrow_fraction(&cas, &arrow_start, seg, t),
+        };
+
+        subdivide_segment(
+            camera,
+            &sample_at,
+            &mut spline_points,
+            0.0,
+            sample_at(0.0),
+            1.0,
+            sample_at(1.0),
+            0,
+        );
+    }
+
+    if spline_points.len() < 2 {
+        return;
+    }
+
+    compute_frames(&mut spline_points);
+    emit_spline_surface(&spline_points, out, adaptive_coil_segments(camera));
 }
 
 // ---------------------------------------------------------------------------

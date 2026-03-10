@@ -25,7 +25,6 @@ pub fn render_viewport(frame: &mut Frame, area: Rect, app: &App) {
             app.viz_mode,
             width,
             height,
-            &app.mesh_cache,
         );
         let widget = framebuffer_to_braille_widget(&fb);
         frame.render_widget(widget, area);
@@ -60,7 +59,6 @@ fn render_hd_viewport(frame: &mut Frame, area: Rect, app: &App) {
         app.viz_mode,
         px_w,
         px_h,
-        &app.mesh_cache,
     );
 
     // If the terminal supports a real graphics protocol, convert the

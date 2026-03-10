@@ -51,6 +51,7 @@ pub struct App {
     pub show_help: bool,
     pub show_interface: bool,
     pub interface_analysis: InterfaceAnalysis,
+    pub invert_rotation_controls: bool,
     pub should_quit: bool,
     /// ratatui-image protocol picker for Sixel/Kitty/iTerm2 graphics.
     pub picker: Picker,
@@ -108,6 +109,7 @@ impl App {
             show_help: false,
             show_interface: false,
             interface_analysis,
+            invert_rotation_controls: false,
             should_quit: false,
             picker,
         }
@@ -169,6 +171,18 @@ impl App {
 
     pub fn tick(&mut self) {
         self.camera.tick();
+    }
+
+    pub fn toggle_rotation_order(&mut self) {
+        self.invert_rotation_controls = !self.invert_rotation_controls;
+    }
+
+    pub fn rotation_dir(&self, dir: f64) -> f64 {
+        if self.invert_rotation_controls {
+            -dir
+        } else {
+            dir
+        }
     }
 
     /// Recalculate the zoom factor based on current HD mode and terminal size.

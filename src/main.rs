@@ -162,12 +162,13 @@ fn main() -> Result<()> {
                 {
                     app.should_quit = true
                 }
-                KeyCode::Char('h') | KeyCode::Left => app.camera.rotate_y(1.0),
-                KeyCode::Char('l') | KeyCode::Right => app.camera.rotate_y(-1.0),
-                KeyCode::Char('j') | KeyCode::Down => app.camera.rotate_x(-1.0),
-                KeyCode::Char('k') | KeyCode::Up => app.camera.rotate_x(1.0),
+                KeyCode::Char('h') | KeyCode::Left => app.camera.rotate_y(app.rotation_dir(1.0)),
+                KeyCode::Char('l') | KeyCode::Right => app.camera.rotate_y(app.rotation_dir(-1.0)),
+                KeyCode::Char('j') | KeyCode::Down => app.camera.rotate_x(app.rotation_dir(-1.0)),
+                KeyCode::Char('k') | KeyCode::Up => app.camera.rotate_x(app.rotation_dir(1.0)),
                 KeyCode::Char('u') => app.camera.rotate_z(-1.0),
                 KeyCode::Char('i') => app.camera.rotate_z(1.0),
+                KeyCode::Char('N') => app.toggle_rotation_order(),
                 KeyCode::Char('+') | KeyCode::Char('=') => app.camera.zoom_in(),
                 KeyCode::Char('-') => app.camera.zoom_out(),
                 KeyCode::Char('w') => app.camera.pan(0.0, 1.0),

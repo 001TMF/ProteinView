@@ -1,4 +1,3 @@
-pub mod braille;
 pub mod camera;
 pub mod color;
 pub mod framebuffer;

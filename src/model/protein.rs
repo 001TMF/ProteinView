@@ -71,22 +71,6 @@ pub enum SecondaryStructure {
 }
 
 impl Protein {
-    /// Get all backbone atoms (C-alpha for proteins, C4' for nucleic acids)
-    /// for backbone trace rendering.
-    pub fn backbone_atoms(&self) -> Vec<(&Atom, &Residue, &Chain)> {
-        let mut cas = Vec::new();
-        for chain in &self.chains {
-            for residue in &chain.residues {
-                for atom in &residue.atoms {
-                    if atom.is_backbone {
-                        cas.push((atom, residue, chain));
-                    }
-                }
-            }
-        }
-        cas
-    }
-
     /// Get total atom count
     pub fn atom_count(&self) -> usize {
         self.chains

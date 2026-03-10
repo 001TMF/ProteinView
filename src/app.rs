@@ -30,6 +30,15 @@ impl VizMode {
             Self::Wireframe => "Wireframe",
         }
     }
+
+    pub fn from_cli(mode: &str) -> Self {
+        match mode.to_ascii_lowercase().as_str() {
+            "backbone" => Self::Backbone,
+            "wireframe" => Self::Wireframe,
+            "cartoon" => Self::Cartoon,
+            _ => Self::Cartoon,
+        }
+    }
 }
 
 /// Main application state
@@ -55,6 +64,7 @@ impl App {
     pub fn new(
         mut protein: Protein,
         hd_mode: bool,
+        viz_mode: VizMode,
         term_cols: u16,
         term_rows: u16,
         picker: Picker,
@@ -98,7 +108,7 @@ impl App {
             protein,
             camera,
             color_scheme,
-            viz_mode: VizMode::Cartoon,
+            viz_mode,
             current_chain: 0,
             hd_mode,
             show_help: false,

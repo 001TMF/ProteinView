@@ -5,7 +5,6 @@ use ratatui_image::picker::ProtocolType;
 use ratatui_image::{Image, Resize};
 
 use crate::app::App;
-use crate::render::braille;
 use crate::render::framebuffer::framebuffer_to_braille_widget;
 use crate::render::hd;
 
@@ -14,20 +13,22 @@ pub fn render_viewport(frame: &mut Frame, area: Rect, app: &App) {
     if app.hd_mode {
         render_hd_viewport(frame, area, app);
     } else {
-        // Normal mode uses Braille (2x4 dots per cell, higher resolution but monochrome per cell)
+        // Normal mode still uses the software framebuffer so cartoon rendering
+        // shares the same ribbon mesh path as HD output, then converts to
+        // colored braille cells for terminal display.
         let width = area.width as f64 * 2.0;
         let height = area.height as f64 * 4.0;
-
-        let canvas = braille::render_protein(
+        let fb = hd::render_hd_framebuffer(
             &app.protein,
             &app.camera,
             &app.color_scheme,
             app.viz_mode,
             width,
             height,
+            &app.mesh_cache,
         );
-
-        frame.render_widget(canvas, area);
+        let widget = framebuffer_to_braille_widget(&fb);
+        frame.render_widget(widget, area);
     }
 }
 

@@ -45,8 +45,8 @@ struct Cli {
     #[arg(long, default_value = "structure")]
     color: String,
 
-    /// Visualization mode: backbone, wireframe
-    #[arg(long, default_value = "backbone")]
+    /// Visualization mode: cartoon, backbone, wireframe
+    #[arg(long, default_value = "cartoon")]
     mode: String,
 
     /// Fetch structure from RCSB PDB by ID
@@ -119,7 +119,14 @@ fn main() -> Result<()> {
     );
 
     // Create app with actual terminal dimensions for dynamic zoom
-    let mut app = App::new(protein, cli.hd, term_cols, term_rows, picker);
+    let mut app = App::new(
+        protein,
+        cli.hd,
+        app::VizMode::from_cli(&cli.mode),
+        term_cols,
+        term_rows,
+        picker,
+    );
     log!(
         logfile,
         "app created: hd={} chains={} zoom={:.2}",

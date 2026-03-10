@@ -125,6 +125,18 @@ impl ColorScheme {
     pub fn atom_color(&self, atom: &Atom, residue: &Residue, chain: &Chain) -> Color {
         match self.scheme_type {
             ColorSchemeType::Element => Self::element_color(atom),
+            ColorSchemeType::Interface => {
+                if self.is_interface_residue(residue, chain) {
+                    match atom.element.trim() {
+                        // Keep heteroatom cues visible on highlighted interface residues.
+                        "N" => Color::Rgb(48, 80, 248),
+                        "O" => Color::Rgb(255, 13, 13),
+                        _ => self.interface_color(residue, chain),
+                    }
+                } else {
+                    self.interface_color(residue, chain)
+                }
+            }
             _ => self.residue_color(residue, chain),
         }
     }
@@ -137,9 +149,7 @@ impl ColorScheme {
     ///   - Interface residues: bright orange
     ///   - Non-interface: dim gray-brown
     fn interface_color(&self, residue: &Residue, chain: &Chain) -> Color {
-        let is_contact = self
-            .interface_residues_by_id
-            .contains(&(chain.id.clone(), residue.seq_num));
+        let is_contact = self.is_interface_residue(residue, chain);
         let is_focus = chain.id == self.focus_chain_id;
 
         match (is_focus, is_contact) {
@@ -148,6 +158,11 @@ impl ColorScheme {
             (false, true) => Color::Rgb(255, 165, 0), // Bright orange — antigen interface
             (false, false) => Color::Rgb(100, 80, 60), // Dim brown — antigen non-interface
         }
+    }
+
+    fn is_interface_residue(&self, residue: &Residue, chain: &Chain) -> bool {
+        self.interface_residues_by_id
+            .contains(&(chain.id.clone(), residue.seq_num))
     }
 
     /// CPK-style element coloring

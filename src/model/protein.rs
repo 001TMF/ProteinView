@@ -71,13 +71,16 @@ pub enum SecondaryStructure {
 }
 
 impl Protein {
-    /// Get total atom count
-    pub fn atom_count(&self) -> usize {
+    fn atoms(&self) -> impl Iterator<Item = &Atom> {
         self.chains
             .iter()
             .flat_map(|c| &c.residues)
             .flat_map(|r| &r.atoms)
-            .count()
+    }
+
+    /// Get total atom count
+    pub fn atom_count(&self) -> usize {
+        self.atoms().count()
     }
 
     /// Get total residue count
@@ -87,23 +90,50 @@ impl Protein {
 
     /// Get the bounding radius from origin (call after centering)
     pub fn bounding_radius(&self) -> f64 {
-        self.chains
-            .iter()
-            .flat_map(|c| &c.residues)
-            .flat_map(|r| &r.atoms)
+        self.atoms()
             .filter(|a| a.is_backbone)
             .map(|a| (a.x * a.x + a.y * a.y + a.z * a.z).sqrt())
             .fold(0.0f64, f64::max)
     }
 
+    /// Heuristically detect whether the B-factor column stores pLDDT scores.
+    ///
+    /// AlphaFold/ModelCIF outputs typically store confidence values in the
+    /// range [0, 100], with most atoms above 50 and many above 70. Classic
+    /// experimental B-factors are usually much lower on average even when they
+    /// overlap numerically.
+    pub fn has_plddt(&self) -> bool {
+        let mut total = 0usize;
+        let mut in_range = 0usize;
+        let mut high_conf = 0usize;
+        let mut sum = 0.0f64;
+
+        for atom in self.atoms() {
+            total += 1;
+            let value = atom.b_factor;
+            sum += value;
+            if (0.0..=100.0).contains(&value) {
+                in_range += 1;
+            }
+            if value >= 70.0 {
+                high_conf += 1;
+            }
+        }
+
+        if total == 0 {
+            return false;
+        }
+
+        let mean = sum / total as f64;
+        let in_range_fraction = in_range as f64 / total as f64;
+        let high_conf_fraction = high_conf as f64 / total as f64;
+
+        in_range_fraction >= 0.95 && mean >= 50.0 && high_conf_fraction >= 0.25
+    }
+
     /// Center the protein at the origin
     pub fn center(&mut self) {
-        let atoms: Vec<&Atom> = self
-            .chains
-            .iter()
-            .flat_map(|c| &c.residues)
-            .flat_map(|r| &r.atoms)
-            .collect();
+        let atoms: Vec<&Atom> = self.atoms().collect();
 
         if atoms.is_empty() {
             return;
@@ -123,5 +153,54 @@ impl Protein {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn atom_with_bfactor(b_factor: f64) -> Atom {
+        Atom {
+            name: "CA".to_string(),
+            element: "C".to_string(),
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            b_factor,
+            is_backbone: true,
+        }
+    }
+
+    fn protein_from_bfactors(values: &[f64]) -> Protein {
+        Protein {
+            name: "test".to_string(),
+            chains: vec![Chain {
+                id: "A".to_string(),
+                molecule_type: MoleculeType::Protein,
+                residues: values
+                    .iter()
+                    .enumerate()
+                    .map(|(i, value)| Residue {
+                        name: "ALA".to_string(),
+                        seq_num: i as i32 + 1,
+                        atoms: vec![atom_with_bfactor(*value)],
+                        secondary_structure: SecondaryStructure::Coil,
+                    })
+                    .collect(),
+            }],
+        }
+    }
+
+    #[test]
+    fn detects_plddt_like_confidence_scores() {
+        let protein = protein_from_bfactors(&[95.0, 92.0, 88.0, 76.0, 67.0, 54.0]);
+        assert!(protein.has_plddt());
+    }
+
+    #[test]
+    fn rejects_typical_experimental_bfactors() {
+        let protein = protein_from_bfactors(&[12.0, 18.0, 22.0, 30.0, 16.0, 25.0]);
+        assert!(!protein.has_plddt());
     }
 }

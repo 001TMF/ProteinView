@@ -8,6 +8,7 @@ use ratatui::style::Color;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ColorSchemeType {
     Structure,
+    Plddt,
     Chain,
     Element,
     BFactor,
@@ -16,9 +17,16 @@ pub enum ColorSchemeType {
 }
 
 impl ColorSchemeType {
-    pub fn next(&self) -> Self {
+    pub fn next(&self, has_plddt: bool) -> Self {
         match self {
-            Self::Structure => Self::Chain,
+            Self::Structure => {
+                if has_plddt {
+                    Self::Plddt
+                } else {
+                    Self::Chain
+                }
+            }
+            Self::Plddt => Self::Chain,
             Self::Chain => Self::Element,
             Self::Element => Self::BFactor,
             Self::BFactor => Self::Rainbow,
@@ -28,9 +36,29 @@ impl ColorSchemeType {
         }
     }
 
+    pub fn from_cli(name: &str, has_plddt: bool) -> Self {
+        match name.to_ascii_lowercase().as_str() {
+            "structure" => Self::Structure,
+            "plddt" => {
+                if has_plddt {
+                    Self::Plddt
+                } else {
+                    Self::Structure
+                }
+            }
+            "chain" => Self::Chain,
+            "element" => Self::Element,
+            "bfactor" | "b-factor" => Self::BFactor,
+            "rainbow" => Self::Rainbow,
+            "interface" => Self::Interface,
+            _ => Self::Structure,
+        }
+    }
+
     pub fn name(&self) -> &str {
         match self {
             Self::Structure => "Structure",
+            Self::Plddt => "pLDDT",
             Self::Chain => "Chain",
             Self::Element => "Element",
             Self::BFactor => "B-Factor",
@@ -84,6 +112,7 @@ impl ColorScheme {
     pub fn residue_color(&self, residue: &Residue, chain: &Chain) -> Color {
         match self.scheme_type {
             ColorSchemeType::Structure => self.structure_color(residue),
+            ColorSchemeType::Plddt => self.plddt_color(residue),
             ColorSchemeType::Chain => self.chain_color(chain),
             ColorSchemeType::Element => Color::Rgb(144, 144, 144),
             ColorSchemeType::BFactor => self.bfactor_color(residue),
@@ -176,6 +205,24 @@ impl ColorScheme {
         Color::Rgb(r, 0, b)
     }
 
+    fn plddt_color(&self, residue: &Residue) -> Color {
+        let avg_plddt: f64 = if residue.atoms.is_empty() {
+            0.0
+        } else {
+            residue.atoms.iter().map(|a| a.b_factor).sum::<f64>() / residue.atoms.len() as f64
+        };
+
+        if avg_plddt >= 90.0 {
+            Color::Rgb(0, 83, 214)
+        } else if avg_plddt >= 70.0 {
+            Color::Rgb(101, 203, 243)
+        } else if avg_plddt >= 50.0 {
+            Color::Rgb(255, 219, 19)
+        } else {
+            Color::Rgb(255, 125, 69)
+        }
+    }
+
     fn rainbow_color(&self, residue: &Residue) -> Color {
         if self.total_residues == 0 {
             return Color::White;
@@ -233,7 +280,7 @@ fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::protein::{Residue, SecondaryStructure, is_nucleotide};
+    use crate::model::protein::{Atom, Residue, SecondaryStructure, is_nucleotide};
 
     /// Build a minimal residue for testing color assignment.
     fn make_residue(name: &str, ss: SecondaryStructure) -> Residue {
@@ -413,5 +460,30 @@ mod tests {
         let scheme = ColorScheme::new(ColorSchemeType::Structure, 100);
         let r = make_residue("LEU", SecondaryStructure::Coil);
         assert_eq!(scheme.structure_color(&r), Color::Rgb(0, 204, 0));
+    }
+
+    #[test]
+    fn plddt_color_uses_standard_af_bands() {
+        let scheme = ColorScheme::new(ColorSchemeType::Plddt, 100);
+
+        let mk = |score: f64| Residue {
+            name: "ALA".to_string(),
+            seq_num: 1,
+            atoms: vec![Atom {
+                name: "CA".to_string(),
+                element: "C".to_string(),
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                b_factor: score,
+                is_backbone: true,
+            }],
+            secondary_structure: SecondaryStructure::Coil,
+        };
+
+        assert_eq!(scheme.plddt_color(&mk(95.0)), Color::Rgb(0, 83, 214));
+        assert_eq!(scheme.plddt_color(&mk(80.0)), Color::Rgb(101, 203, 243));
+        assert_eq!(scheme.plddt_color(&mk(60.0)), Color::Rgb(255, 219, 19));
+        assert_eq!(scheme.plddt_color(&mk(40.0)), Color::Rgb(255, 125, 69));
     }
 }

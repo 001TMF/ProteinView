@@ -41,7 +41,7 @@ struct Cli {
     #[arg(long, alias = "pixel")]
     hd: bool,
 
-    /// Color scheme: structure, chain, element, bfactor, rainbow
+    /// Color scheme: structure, plddt, chain, element, bfactor, rainbow
     #[arg(long, default_value = "structure")]
     color: String,
 
@@ -73,6 +73,7 @@ fn main() -> Result<()> {
 
     // Load protein structure
     let protein = parser::pdb::load_structure(&file_path)?;
+    let has_plddt = protein.has_plddt();
     eprintln!(
         "Loaded: {} ({} chains, {} residues, {} atoms)",
         protein.name,
@@ -122,6 +123,7 @@ fn main() -> Result<()> {
     let mut app = App::new(
         protein,
         cli.hd,
+        render::color::ColorSchemeType::from_cli(&cli.color, has_plddt),
         app::VizMode::from_cli(&cli.mode),
         term_cols,
         term_rows,

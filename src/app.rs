@@ -61,6 +61,7 @@ impl App {
     pub fn new(
         mut protein: Protein,
         hd_mode: bool,
+        initial_color: ColorSchemeType,
         viz_mode: VizMode,
         term_cols: u16,
         term_rows: u16,
@@ -98,7 +99,7 @@ impl App {
         // Pre-compute interface analysis (4.5A cutoff)
         let interface_analysis = analyze_interface(&protein, 4.5);
 
-        let color_scheme = ColorScheme::new(ColorSchemeType::Structure, total_residues);
+        let color_scheme = ColorScheme::new(initial_color, total_residues);
         Self {
             protein,
             camera,
@@ -116,7 +117,7 @@ impl App {
     }
 
     pub fn cycle_color(&mut self) {
-        let next = self.color_scheme.scheme_type.next();
+        let next = self.color_scheme.scheme_type.next(self.protein.has_plddt());
         self.color_scheme = ColorScheme::new(next, self.protein.residue_count());
     }
 

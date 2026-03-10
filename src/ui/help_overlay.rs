@@ -53,7 +53,7 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("  c          ", Style::default().fg(Color::Yellow)),
-            Span::raw("Cycle color scheme"),
+            Span::raw("Cycle color scheme (pLDDT when available)"),
         ]),
         Line::from(vec![
             Span::styled("  v          ", Style::default().fg(Color::Yellow)),

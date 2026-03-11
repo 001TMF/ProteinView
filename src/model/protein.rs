@@ -12,6 +12,13 @@ pub const RNA_RESIDUES: &[&str] = &["A", "U", "G", "C", "I", "AMP", "UMP", "GMP"
 
 /// Standard DNA residue names.
 pub const DNA_RESIDUES: &[&str] = &["DA", "DT", "DG", "DC", "DI", "T"];
+/// Standard amino-acid residue names (including common ambiguous/special forms).
+pub const AMINO_ACID_RESIDUES: &[&str] = &[
+    "ALA", "ARG", "ASN", "ASP", "ASX", "CYS", "GLN", "GLU", "GLX", "GLY", "HIS", "ILE", "LEU",
+    "LYS", "MET", "PHE", "PRO", "PYL", "SEC", "SER", "THR", "TRP", "TYR", "VAL",
+];
+/// Common water residue names to exclude from ligand rendering.
+pub const WATER_RESIDUES: &[&str] = &["HOH", "WAT", "H2O", "DOD"];
 
 /// Returns true if the residue name is a nucleotide (RNA or DNA).
 #[allow(dead_code)]
@@ -22,6 +29,28 @@ pub fn is_nucleotide(name: &str) -> bool {
 /// Returns true if the residue name is a purine base (A, G, I and their variants).
 pub fn is_purine(name: &str) -> bool {
     matches!(name, "A" | "DA" | "AMP" | "G" | "DG" | "GMP" | "I" | "DI")
+}
+
+/// Returns true if the residue name is a standard amino acid code.
+pub fn is_amino_acid(name: &str) -> bool {
+    AMINO_ACID_RESIDUES.contains(&name)
+}
+
+/// Returns true if the residue should be treated as solvent/water.
+pub fn is_water(name: &str) -> bool {
+    WATER_RESIDUES.contains(&name)
+}
+
+/// Returns true if the residue should be rendered as ligand.
+///
+/// Ligands are non-water, non-polymer residues that do not look like
+/// amino-acid or nucleotide residues.
+pub fn is_ligand_residue(residue: &Residue) -> bool {
+    let name = residue.name.trim();
+    if is_water(name) || is_amino_acid(name) || is_nucleotide(name) {
+        return false;
+    }
+    !residue.atoms.is_empty()
 }
 
 /// A complete protein structure
@@ -71,55 +100,73 @@ pub enum SecondaryStructure {
 }
 
 impl Protein {
-    /// Get all backbone atoms (C-alpha for proteins, C4' for nucleic acids)
-    /// for backbone trace rendering.
-    pub fn backbone_atoms(&self) -> Vec<(&Atom, &Residue, &Chain)> {
-        let mut cas = Vec::new();
-        for chain in &self.chains {
-            for residue in &chain.residues {
-                for atom in &residue.atoms {
-                    if atom.is_backbone {
-                        cas.push((atom, residue, chain));
-                    }
-                }
-            }
-        }
-        cas
+    fn atoms(&self) -> impl Iterator<Item = &Atom> {
+        self.chains
+            .iter()
+            .flat_map(|c| &c.residues)
+            .flat_map(|r| &r.atoms)
     }
 
     /// Get total atom count
     pub fn atom_count(&self) -> usize {
-        self.chains.iter()
-            .flat_map(|c| &c.residues)
-            .flat_map(|r| &r.atoms)
-            .count()
+        self.atoms().count()
     }
 
     /// Get total residue count
     pub fn residue_count(&self) -> usize {
-        self.chains.iter()
-            .flat_map(|c| &c.residues)
-            .count()
+        self.chains.iter().flat_map(|c| &c.residues).count()
     }
 
     /// Get the bounding radius from origin (call after centering)
     pub fn bounding_radius(&self) -> f64 {
-        self.chains.iter()
-            .flat_map(|c| &c.residues)
-            .flat_map(|r| &r.atoms)
+        self.atoms()
             .filter(|a| a.is_backbone)
             .map(|a| (a.x * a.x + a.y * a.y + a.z * a.z).sqrt())
             .fold(0.0f64, f64::max)
     }
 
+    /// Heuristically detect whether the B-factor column stores pLDDT scores.
+    ///
+    /// AlphaFold/ModelCIF outputs typically store confidence values in the
+    /// range [0, 100], with most atoms above 50 and many above 70. Classic
+    /// experimental B-factors are usually much lower on average even when they
+    /// overlap numerically.
+    pub fn has_plddt(&self) -> bool {
+        let mut total = 0usize;
+        let mut in_range = 0usize;
+        let mut high_conf = 0usize;
+        let mut sum = 0.0f64;
+
+        for atom in self.atoms() {
+            total += 1;
+            let value = atom.b_factor;
+            sum += value;
+            if (0.0..=100.0).contains(&value) {
+                in_range += 1;
+            }
+            if value >= 70.0 {
+                high_conf += 1;
+            }
+        }
+
+        if total == 0 {
+            return false;
+        }
+
+        let mean = sum / total as f64;
+        let in_range_fraction = in_range as f64 / total as f64;
+        let high_conf_fraction = high_conf as f64 / total as f64;
+
+        in_range_fraction >= 0.95 && mean >= 50.0 && high_conf_fraction >= 0.25
+    }
+
     /// Center the protein at the origin
     pub fn center(&mut self) {
-        let atoms: Vec<&Atom> = self.chains.iter()
-            .flat_map(|c| &c.residues)
-            .flat_map(|r| &r.atoms)
-            .collect();
+        let atoms: Vec<&Atom> = self.atoms().collect();
 
-        if atoms.is_empty() { return; }
+        if atoms.is_empty() {
+            return;
+        }
 
         let n = atoms.len() as f64;
         let cx: f64 = atoms.iter().map(|a| a.x).sum::<f64>() / n;
@@ -135,5 +182,83 @@ impl Protein {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn atom_with_bfactor(b_factor: f64) -> Atom {
+        Atom {
+            name: "CA".to_string(),
+            element: "C".to_string(),
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            b_factor,
+            is_backbone: true,
+        }
+    }
+
+    fn protein_from_bfactors(values: &[f64]) -> Protein {
+        Protein {
+            name: "test".to_string(),
+            chains: vec![Chain {
+                id: "A".to_string(),
+                molecule_type: MoleculeType::Protein,
+                residues: values
+                    .iter()
+                    .enumerate()
+                    .map(|(i, value)| Residue {
+                        name: "ALA".to_string(),
+                        seq_num: i as i32 + 1,
+                        atoms: vec![atom_with_bfactor(*value)],
+                        secondary_structure: SecondaryStructure::Coil,
+                    })
+                    .collect(),
+            }],
+        }
+    }
+
+    #[test]
+    fn detects_plddt_like_confidence_scores() {
+        let protein = protein_from_bfactors(&[95.0, 92.0, 88.0, 76.0, 67.0, 54.0]);
+        assert!(protein.has_plddt());
+    }
+
+    #[test]
+    fn rejects_typical_experimental_bfactors() {
+        let protein = protein_from_bfactors(&[12.0, 18.0, 22.0, 30.0, 16.0, 25.0]);
+        assert!(!protein.has_plddt());
+    }
+
+    #[test]
+    fn detects_ligand_residue_from_name() {
+        let residue = Residue {
+            name: "LIG".to_string(),
+            seq_num: 1,
+            atoms: vec![atom_with_bfactor(0.0)],
+            secondary_structure: SecondaryStructure::Coil,
+        };
+        assert!(is_ligand_residue(&residue));
+    }
+
+    #[test]
+    fn excludes_amino_acids_and_water_from_ligands() {
+        let aa = Residue {
+            name: "ALA".to_string(),
+            seq_num: 1,
+            atoms: vec![atom_with_bfactor(0.0)],
+            secondary_structure: SecondaryStructure::Coil,
+        };
+        let water = Residue {
+            name: "HOH".to_string(),
+            seq_num: 2,
+            atoms: vec![atom_with_bfactor(0.0)],
+            secondary_structure: SecondaryStructure::Coil,
+        };
+        assert!(!is_ligand_residue(&aa));
+        assert!(!is_ligand_residue(&water));
     }
 }

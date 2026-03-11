@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
 use crate::app::App;
 
@@ -19,7 +19,10 @@ pub fn render_statusbar(frame: &mut Frame, area: Rect, app: &App) {
 
     let status = Paragraph::new(Line::from(vec![
         Span::styled("├", Style::default().fg(Color::DarkGray)),
-        Span::styled("─".repeat(area.width as usize - 2), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "─".repeat(area.width as usize - 2),
+            Style::default().fg(Color::DarkGray),
+        ),
         Span::styled("┤", Style::default().fg(Color::DarkGray)),
     ]));
     frame.render_widget(status, area);
@@ -31,11 +34,17 @@ pub fn render_statusbar(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled("│ ", Style::default().fg(Color::DarkGray)),
             Span::styled(&chain_info, Style::default().fg(Color::Cyan)),
             Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{} res ", res_count), Style::default().fg(Color::White)),
+            Span::styled(
+                format!("{} res ", res_count),
+                Style::default().fg(Color::White),
+            ),
             Span::styled("│ ", Style::default().fg(Color::DarkGray)),
             Span::styled(app.viz_mode.name(), Style::default().fg(Color::Green)),
             Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(app.color_scheme.scheme_type.name(), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                app.color_scheme.scheme_type.name(),
+                Style::default().fg(Color::Yellow),
+            ),
             Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
             Span::styled(render_mode, Style::default().fg(Color::Magenta)),
             Span::raw(" "),

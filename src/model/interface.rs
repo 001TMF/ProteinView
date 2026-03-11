@@ -101,7 +101,11 @@ pub fn analyze_interface(protein: &Protein, cutoff: f64) -> InterfaceAnalysis {
     }
 
     // Sort contacts by minimum distance (closest first).
-    contacts.sort_by(|a, b| a.min_distance.partial_cmp(&b.min_distance).unwrap_or(std::cmp::Ordering::Equal));
+    contacts.sort_by(|a, b| {
+        a.min_distance
+            .partial_cmp(&b.min_distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Count interface residues per chain.
     let mut chain_interface_counts = vec![0usize; num_chains];
@@ -121,7 +125,10 @@ pub fn analyze_interface(protein: &Protein, cutoff: f64) -> InterfaceAnalysis {
 
 impl InterfaceAnalysis {
     /// Convert interface residues to (chain_id, seq_num) pairs using the protein.
-    pub fn interface_residues_by_id_with_protein(&self, protein: &Protein) -> HashSet<(String, i32)> {
+    pub fn interface_residues_by_id_with_protein(
+        &self,
+        protein: &Protein,
+    ) -> HashSet<(String, i32)> {
         let mut set = HashSet::new();
         for &(chain_idx, res_idx) in &self.interface_residues {
             if let Some(chain) = protein.chains.get(chain_idx) {
@@ -166,13 +173,7 @@ impl InterfaceAnalysis {
             .iter()
             .enumerate()
             .filter(|(idx, _)| self.chain_interface_counts.get(*idx).copied().unwrap_or(0) > 0)
-            .map(|(idx, chain)| {
-                format!(
-                    "Chain {}: {}",
-                    chain.id,
-                    self.chain_interface_counts[idx]
-                )
-            })
+            .map(|(idx, chain)| format!("Chain {}: {}", chain.id, self.chain_interface_counts[idx]))
             .collect();
 
         lines.push(format!(
@@ -278,7 +279,7 @@ mod tests {
                 Chain {
                     id: "B".to_string(),
                     residues: vec![
-                        make_residue("ASP", 1, 3.0, 0.0, 0.0), // within 4.5 of A:ALA1
+                        make_residue("ASP", 1, 3.0, 0.0, 0.0),  // within 4.5 of A:ALA1
                         make_residue("LEU", 2, 20.0, 0.0, 0.0), // far away
                     ],
                     molecule_type: MoleculeType::Protein,
@@ -381,7 +382,10 @@ mod tests {
         };
 
         let analysis = analyze_interface(&protein, 4.5);
-        assert!(analysis.contacts.is_empty(), "hydrogen-only atoms must not produce contacts");
+        assert!(
+            analysis.contacts.is_empty(),
+            "hydrogen-only atoms must not produce contacts"
+        );
     }
 
     #[test]

@@ -38,7 +38,7 @@ Terminal protein structure viewer -- load, rotate, and explore PDB/CIF structure
 - **HD pixel rendering** -- Sixel/Kitty/iTerm2 graphics protocol support via ratatui-image for pixel-perfect display (`--hd`)
 - **Cartoon ribbon visualization** -- smooth ribbon/tube rendering with depth fog and Lambert shading for helices, beta-sheets, and coils
 - **3 visualization modes** -- Cartoon (ribbon), Backbone (CA trace), Wireframe (all-atom bonds)
-- **5 color schemes** -- secondary structure, chain, element, B-factor, rainbow
+- **6 color schemes** -- secondary structure, pLDDT (when available), chain, element, B-factor, rainbow
 - **Interactive rotation, zoom, pan** -- vim-style keybindings with auto-rotation
 - **Protein-protein interface analysis** -- detect and highlight inter-chain contacts
 - **PDB and mmCIF format support** -- including secondary structure parsing from both formats
@@ -46,6 +46,14 @@ Terminal protein structure viewer -- load, rotate, and explore PDB/CIF structure
 - **Single static binary**, zero runtime dependencies
 
 ## Installation
+
+Easy install via pip for x86 (for arm, it will try to build it on your machine using maturin)
+
+```bash
+pip install proteinview
+```
+
+or build it here from source
 
 ```bash
 # Basic install
@@ -68,6 +76,9 @@ proteinview examples/4HHB.pdb --hd
 
 # Choose color scheme
 proteinview examples/1UBQ.pdb --color rainbow
+
+# Color AlphaFold / ModelCIF structures by pLDDT
+proteinview examples/AF3_TNFa.pdb --color plddt
 
 # Choose visualization mode
 proteinview examples/4HHB.pdb --mode wireframe
@@ -110,6 +121,7 @@ proteinview --fetch 1UBQ
 | Scheme               | Description                                                        |
 |----------------------|--------------------------------------------------------------------|
 | **Secondary Structure** | Helix (red), sheet (yellow), coil (green), turn (blue). Default. |
+| **pLDDT**            | AlphaFold confidence colors when the file stores pLDDT scores.     |
 | **Chain**            | Each chain gets a distinct color from a curated palette.           |
 | **Element (CPK)**    | Atoms colored by element: C gray, N blue, O red, S yellow.        |
 | **B-factor**         | Blue (low mobility) to red (high mobility) gradient.               |
@@ -122,6 +134,8 @@ proteinview --fetch 1UBQ
 | `examples/1UBQ.pdb`  | Ubiquitin -- 76 residues, single chain, classic test protein             |
 | `examples/4HHB.pdb`  | Hemoglobin -- 4 chains, 574 residues, good for multi-chain viewing       |
 | `examples/1ZVH.cif`  | Antibody-antigen complex -- mmCIF format, good for interface analysis    |
+| `examples/AF3_TNFa.pdb` | AlphaFold-style PDB with pLDDT confidence values                       |
+| `examples/OBP5_model_0.cif` | ModelCIF example with pLDDT-style confidence values              |
 
 ### Interface Analysis
 

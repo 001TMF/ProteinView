@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
 /// Render the retro-styled header with protein name
 pub fn render_header(frame: &mut Frame, area: Rect, protein_name: &str) {

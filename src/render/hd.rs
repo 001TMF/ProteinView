@@ -1,9 +1,15 @@
 use crate::app::VizMode;
-use crate::model::protein::{MoleculeType, Protein};
+use crate::model::protein::{MoleculeType, Protein, is_ligand_residue};
 use crate::render::camera::Camera;
-use crate::render::color::{color_to_rgb, ColorScheme};
-use crate::render::framebuffer::{default_light_dir, Framebuffer, Triangle};
-use crate::render::ribbon::RibbonTriangle;
+use crate::render::color::{ColorScheme, color_to_rgb};
+use crate::render::framebuffer::{Framebuffer, Triangle, default_light_dir};
+use crate::render::ribbon::generate_ribbon_mesh_adaptive;
+
+const LIGAND_STICK_COLOR_RGB: [u8; 3] = [0, 255, 255];
+const LIGAND_ATOM_RADIUS_PX: f64 = 9.0;
+const LIGAND_BOND_THICKNESS_PX: f64 = 18.0;
+const LIGAND_ATOM_RADIUS_PX_BRAILLE: f64 = 1.8;
+const LIGAND_BOND_THICKNESS_PX_BRAILLE: f64 = 1.8;
 
 /// Render the protein into a raw [`Framebuffer`] at the given pixel dimensions.
 ///
@@ -17,7 +23,7 @@ pub fn render_hd_framebuffer(
     viz_mode: VizMode,
     width: f64,
     height: f64,
-    mesh: &[RibbonTriangle],
+    is_hd_output: bool,
 ) -> Framebuffer {
     let px_w = width as usize;
     let px_h = height as usize;
@@ -32,13 +38,15 @@ pub fn render_hd_framebuffer(
 
     match viz_mode {
         VizMode::Cartoon => {
-            for tri in mesh {
+            let adaptive_mesh = generate_ribbon_mesh_adaptive(protein, color_scheme, camera);
+            let mut screen_tris = Vec::with_capacity(adaptive_mesh.len());
+            for tri in &adaptive_mesh {
                 let v0 = camera.project(tri.verts[0][0], tri.verts[0][1], tri.verts[0][2]);
                 let v1 = camera.project(tri.verts[1][0], tri.verts[1][1], tri.verts[1][2]);
                 let v2 = camera.project(tri.verts[2][0], tri.verts[2][1], tri.verts[2][2]);
                 let rotated_normal =
                     rotate_normal(camera, tri.normal[0], tri.normal[1], tri.normal[2]);
-                let screen_tri = Triangle {
+                screen_tris.push(Triangle {
                     verts: [
                         to_pixel(v0.x, v0.y, v0.z, half_w, half_h),
                         to_pixel(v1.x, v1.y, v1.z, half_w, half_h),
@@ -46,15 +54,18 @@ pub fn render_hd_framebuffer(
                     ],
                     color: tri.color,
                     normal: rotated_normal,
-                };
-                fb.rasterize_triangle_depth(&screen_tri, light_dir);
+                });
             }
+            fb.rasterize_triangles_tiled(&screen_tris, light_dir);
+            render_ligand_sticks_fb(&mut fb, protein, camera, half_w, half_h, is_hd_output);
         }
         VizMode::Backbone => {
             render_backbone_fb(&mut fb, protein, camera, color_scheme, half_w, half_h);
+            render_ligand_sticks_fb(&mut fb, protein, camera, half_w, half_h, is_hd_output);
         }
         VizMode::Wireframe => {
             render_wireframe_fb(&mut fb, protein, camera, color_scheme, half_w, half_h);
+            render_ligand_sticks_fb(&mut fb, protein, camera, half_w, half_h, is_hd_output);
         }
     }
 
@@ -62,26 +73,74 @@ pub fn render_hd_framebuffer(
     // based on their z-buffer depth.  This gives uniform depth cues across all
     // rendering modes (triangles, lines, circles).
     fb.apply_depth_tint([40, 50, 70], 0.35);
+    if is_hd_output && matches!(viz_mode, VizMode::Cartoon) {
+        apply_cartoon_outline(&mut fb);
+    }
 
     fb
 }
 
+/// Add a subtle dark outline around cartoon geometry in HD mode.
+///
+/// We mark a pixel as an outline if it belongs to rendered geometry and either:
+/// 1. touches background, or
+/// 2. has a noticeable depth discontinuity against an immediate neighbor.
+/// Then we darken those pixels to preserve the underlying color cues.
+fn apply_cartoon_outline(fb: &mut Framebuffer) {
+    if fb.width < 3 || fb.height < 3 {
+        return;
+    }
+
+    const DEPTH_EDGE_THRESHOLD: f64 = 0.14;
+    const DARKEN_FACTOR: f64 = 0.35;
+    let w = fb.width;
+    let h = fb.height;
+    let mut edge_mask = vec![false; w * h];
+
+    for y in 1..(h - 1) {
+        for x in 1..(w - 1) {
+            let idx = y * w + x;
+            let z = fb.depth[idx];
+            if !z.is_finite() {
+                continue;
+            }
+
+            let mut background_neighbor = false;
+            let mut depth_edge = false;
+            let neighbors = [idx - 1, idx + 1, idx - w, idx + w];
+            for nidx in neighbors {
+                let nz = fb.depth[nidx];
+                if !nz.is_finite() {
+                    background_neighbor = true;
+                    break;
+                }
+                if (z - nz).abs() > DEPTH_EDGE_THRESHOLD {
+                    depth_edge = true;
+                }
+            }
+
+            if background_neighbor || depth_edge {
+                edge_mask[idx] = true;
+            }
+        }
+    }
+
+    for (idx, is_edge) in edge_mask.into_iter().enumerate() {
+        if !is_edge {
+            continue;
+        }
+        let c = fb.color[idx];
+        fb.color[idx] = [
+            (c[0] as f64 * DARKEN_FACTOR) as u8,
+            (c[1] as f64 * DARKEN_FACTOR) as u8,
+            (c[2] as f64 * DARKEN_FACTOR) as u8,
+        ];
+    }
+}
 
 /// Apply the camera's rotation to a direction vector (no zoom/pan).
 fn rotate_normal(camera: &Camera, nx: f64, ny: f64, nz: f64) -> [f64; 3] {
-    let (sin_x, cos_x) = camera.rot_x.sin_cos();
-    let y1 = ny * cos_x - nz * sin_x;
-    let z1 = ny * sin_x + nz * cos_x;
-
-    let (sin_y, cos_y) = camera.rot_y.sin_cos();
-    let x2 = nx * cos_y + z1 * sin_y;
-    let z2 = -nx * sin_y + z1 * cos_y;
-
-    let (sin_z, cos_z) = camera.rot_z.sin_cos();
-    let x3 = x2 * cos_z - y1 * sin_z;
-    let y3 = x2 * sin_z + y1 * cos_z;
-
-    [x3, y3, z2]
+    camera.rotate_vector(nx, ny, nz)
 }
 
 /// Convert projected coords (centered at origin) to pixel coords (top-left origin).
@@ -116,14 +175,7 @@ fn render_backbone_fb(
     }
 }
 
-fn atoms_bonded_3d(
-    a1_x: f64,
-    a1_y: f64,
-    a1_z: f64,
-    a2_x: f64,
-    a2_y: f64,
-    a2_z: f64,
-) -> bool {
+fn atoms_bonded_3d(a1_x: f64, a1_y: f64, a1_z: f64, a2_x: f64, a2_y: f64, a2_z: f64) -> bool {
     let dx = a2_x - a1_x;
     let dy = a2_y - a1_y;
     let dz = a2_z - a1_z;
@@ -146,6 +198,9 @@ fn render_wireframe_fb(
 ) {
     for chain in &protein.chains {
         for residue in &chain.residues {
+            if is_ligand_residue(residue) {
+                continue;
+            }
             let projected: Vec<_> = residue
                 .atoms
                 .iter()
@@ -180,6 +235,9 @@ fn render_wireframe_fb(
         for i in 0..chain.residues.len().saturating_sub(1) {
             let res_curr = &chain.residues[i];
             let res_next = &chain.residues[i + 1];
+            if is_ligand_residue(res_curr) || is_ligand_residue(res_next) {
+                continue;
+            }
 
             let (from_atom, to_atom) = match chain.molecule_type {
                 MoleculeType::RNA | MoleculeType::DNA => {
@@ -201,6 +259,59 @@ fn render_wireframe_fb(
                 let px2 = to_pixel(p2.x, p2.y, p2.z, half_w, half_h);
                 let color = color_to_rgb(color_scheme.atom_color(a1, res_curr, chain));
                 fb.draw_thick_line_3d(px1, px2, color, 1.5);
+            }
+        }
+    }
+}
+
+/// Render ligands as cyan sticks across all visualization modes.
+fn render_ligand_sticks_fb(
+    fb: &mut Framebuffer,
+    protein: &Protein,
+    camera: &Camera,
+    half_w: f64,
+    half_h: f64,
+    is_hd_output: bool,
+) {
+    let atom_radius = if is_hd_output {
+        LIGAND_ATOM_RADIUS_PX
+    } else {
+        LIGAND_ATOM_RADIUS_PX_BRAILLE
+    };
+    let bond_thickness = if is_hd_output {
+        LIGAND_BOND_THICKNESS_PX
+    } else {
+        LIGAND_BOND_THICKNESS_PX_BRAILLE
+    };
+
+    for chain in &protein.chains {
+        for residue in &chain.residues {
+            if !is_ligand_residue(residue) {
+                continue;
+            }
+
+            let projected: Vec<_> = residue
+                .atoms
+                .iter()
+                .map(|a| {
+                    let p = camera.project(a.x, a.y, a.z);
+                    let px = to_pixel(p.x, p.y, p.z, half_w, half_h);
+                    (a, px)
+                })
+                .collect();
+
+            for (_, px) in &projected {
+                fb.draw_circle_z(px[0], px[1], px[2], atom_radius, LIGAND_STICK_COLOR_RGB);
+            }
+
+            for i in 0..projected.len() {
+                for j in (i + 1)..projected.len() {
+                    let (a1, p1) = &projected[i];
+                    let (a2, p2) = &projected[j];
+                    if atoms_bonded_3d(a1.x, a1.y, a1.z, a2.x, a2.y, a2.z) {
+                        fb.draw_thick_line_3d(*p1, *p2, LIGAND_STICK_COLOR_RGB, bond_thickness);
+                    }
+                }
             }
         }
     }

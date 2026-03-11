@@ -1,6 +1,10 @@
+use crate::model::protein::{
+    Atom, Chain, DNA_RESIDUES, MoleculeType, Protein, RNA_RESIDUES, Residue, SecondaryStructure,
+};
+use crate::model::secondary::{
+    assign_from_cif_file, assign_from_pdb_file, infer_protein_secondary_structure,
+};
 use anyhow::Result;
-use crate::model::protein::{Protein, Chain, MoleculeType, Residue, Atom, SecondaryStructure, RNA_RESIDUES, DNA_RESIDUES};
-use crate::model::secondary::{assign_from_pdb_file, assign_from_cif_file};
 
 /// Load a protein structure from a PDB or mmCIF file
 pub fn load_structure(path: &str) -> Result<Protein> {
@@ -24,7 +28,10 @@ pub fn load_structure(path: &str) -> Result<Protein> {
             for atom in residue.atoms() {
                 atoms.push(Atom {
                     name: atom.name().to_string(),
-                    element: atom.element().map(|e| format!("{:?}", e)).unwrap_or_default(),
+                    element: atom
+                        .element()
+                        .map(|e| format!("{:?}", e))
+                        .unwrap_or_default(),
                     x: atom.x(),
                     y: atom.y(),
                     z: atom.z(),
@@ -56,7 +63,9 @@ pub fn load_structure(path: &str) -> Result<Protein> {
 
     // If all residues are still Coil (no PDB HELIX/SHEET records found),
     // try CIF _struct_conf/_struct_sheet_range parsing as a fallback.
-    let all_coil = protein.chains.iter()
+    let all_coil = protein
+        .chains
+        .iter()
         .flat_map(|c| &c.residues)
         .all(|r| r.secondary_structure == SecondaryStructure::Coil);
     if all_coil {
@@ -65,6 +74,8 @@ pub fn load_structure(path: &str) -> Result<Protein> {
             assign_from_cif_file(&mut protein, path);
         }
     }
+
+    infer_protein_secondary_structure(&mut protein);
 
     Ok(protein)
 }

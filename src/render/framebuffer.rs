@@ -2,6 +2,7 @@ use image::RgbImage;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use std::thread;
 
 /// RGB pixel framebuffer with z-buffer for software rasterization.
 ///
@@ -27,6 +28,31 @@ pub struct Triangle {
     pub color: [u8; 3],
     /// Unit face normal in world/view space for Lambert shading.
     pub normal: [f64; 3],
+}
+
+#[derive(Clone, Copy)]
+struct PreparedTriangle {
+    verts: [[f64; 3]; 3],
+    shaded: [u8; 3],
+    min_x: usize,
+    max_x: usize,
+    min_y: usize,
+    max_y: usize,
+    inv_denom: f64,
+}
+
+#[derive(Clone, Copy)]
+struct TileRect {
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+}
+
+struct TileResult {
+    rect: TileRect,
+    color: Vec<[u8; 3]>,
+    depth: Vec<f64>,
 }
 
 impl Framebuffer {
@@ -62,6 +88,14 @@ impl Framebuffer {
         }
     }
 
+    #[inline]
+    fn thread_count() -> usize {
+        thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .max(1)
+    }
+
     /// Rasterize a single triangle with Lambert shading and z-buffering.
     ///
     /// `light_dir` should be a *unit* vector pointing toward the light source.
@@ -83,79 +117,241 @@ impl Framebuffer {
     ///
     /// Shading uses two-sided half-Lambert wrap lighting with an ambient term.
     /// Depth fog is handled separately via [`apply_depth_tint`] as a post-pass.
-    pub fn rasterize_triangle_depth(
-        &mut self,
+    #[cfg(test)]
+    pub fn rasterize_triangle_depth(&mut self, tri: &Triangle, light_dir: [f64; 3]) {
+        let Some(prepared) = Self::prepare_triangle(tri, light_dir, self.width, self.height) else {
+            return; // degenerate triangle
+        };
+        Self::rasterize_prepared_into_framebuffer(self, &prepared);
+    }
+
+    pub fn rasterize_triangles_tiled(&mut self, tris: &[Triangle], light_dir: [f64; 3]) {
+        if tris.is_empty() {
+            return;
+        }
+
+        let prepared: Vec<_> = tris
+            .iter()
+            .filter_map(|tri| Self::prepare_triangle(tri, light_dir, self.width, self.height))
+            .collect();
+        if prepared.is_empty() {
+            return;
+        }
+
+        let tile_size = 64usize;
+        let tiles_x = self.width.div_ceil(tile_size);
+        let tiles_y = self.height.div_ceil(tile_size);
+        let tile_count = tiles_x * tiles_y;
+        if tile_count == 0 {
+            return;
+        }
+
+        let mut tile_bins: Vec<Vec<usize>> = (0..tile_count).map(|_| Vec::new()).collect();
+        for (tri_idx, tri) in prepared.iter().enumerate() {
+            let tx0 = tri.min_x / tile_size;
+            let tx1 = tri.max_x / tile_size;
+            let ty0 = tri.min_y / tile_size;
+            let ty1 = tri.max_y / tile_size;
+            for ty in ty0..=ty1 {
+                for tx in tx0..=tx1 {
+                    tile_bins[ty * tiles_x + tx].push(tri_idx);
+                }
+            }
+        }
+
+        let worker_count = Self::thread_count().min(tile_count);
+        if worker_count <= 1 || tile_count <= 1 {
+            for (tile_idx, tri_indices) in tile_bins.iter().enumerate() {
+                if tri_indices.is_empty() {
+                    continue;
+                }
+                let rect = Self::tile_rect(tile_idx, tiles_x, tile_size, self.width, self.height);
+                let tile = Self::render_tile(&prepared, tri_indices, rect);
+                self.blit_tile(tile);
+            }
+            return;
+        }
+
+        let chunk_size = tile_count.div_ceil(worker_count);
+        let mut tiles: Vec<Option<TileResult>> = (0..tile_count).map(|_| None).collect();
+        let width = self.width;
+        let height = self.height;
+
+        thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for worker_idx in 0..worker_count {
+                let start = worker_idx * chunk_size;
+                if start >= tile_count {
+                    break;
+                }
+                let end = (start + chunk_size).min(tile_count);
+                let prepared_ref = &prepared;
+                let bins_ref = &tile_bins;
+                handles.push(scope.spawn(move || {
+                    let mut local_tiles = Vec::new();
+                    for tile_idx in start..end {
+                        let tri_indices = &bins_ref[tile_idx];
+                        if tri_indices.is_empty() {
+                            continue;
+                        }
+                        let rect = Self::tile_rect(tile_idx, tiles_x, tile_size, width, height);
+                        local_tiles
+                            .push((tile_idx, Self::render_tile(prepared_ref, tri_indices, rect)));
+                    }
+                    local_tiles
+                }));
+            }
+
+            for handle in handles {
+                for (tile_idx, tile) in handle.join().expect("tile raster worker panicked") {
+                    tiles[tile_idx] = Some(tile);
+                }
+            }
+        });
+
+        for tile in tiles.into_iter().flatten() {
+            self.blit_tile(tile);
+        }
+    }
+
+    fn prepare_triangle(
         tri: &Triangle,
         light_dir: [f64; 3],
-    ) {
-        const AMBIENT: f64 = 0.55;
+        width: usize,
+        height: usize,
+    ) -> Option<PreparedTriangle> {
+        if width == 0 || height == 0 {
+            return None;
+        }
 
-        // --- Two-sided Lambert shading with wrap lighting ---
-        // Use abs(dot) so back-facing triangles also get proper lighting,
-        // then apply a half-Lambert wrap to soften the falloff
+        const AMBIENT: f64 = 0.55;
         let dot = tri.normal[0] * light_dir[0]
             + tri.normal[1] * light_dir[1]
             + tri.normal[2] * light_dir[2];
         let half_lambert = dot.abs() * 0.4 + 0.6;
         let intensity = AMBIENT + (1.0 - AMBIENT) * half_lambert;
-
-        // Precompute flat shaded color.
-        let shaded: [u8; 3] = [
+        let shaded = [
             (tri.color[0] as f64 * intensity).min(255.0) as u8,
             (tri.color[1] as f64 * intensity).min(255.0) as u8,
             (tri.color[2] as f64 * intensity).min(255.0) as u8,
         ];
 
-        // --- Extract vertices ---
         let [v0, v1, v2] = tri.verts;
-
-        // --- Bounding box (clamped to framebuffer) ---
         let min_x = v0[0].min(v1[0]).min(v2[0]).floor() as isize;
         let max_x = v0[0].max(v1[0]).max(v2[0]).ceil() as isize;
         let min_y = v0[1].min(v1[1]).min(v2[1]).floor() as isize;
         let max_y = v0[1].max(v1[1]).max(v2[1]).ceil() as isize;
-
         let min_x = min_x.max(0) as usize;
-        let max_x = max_x.max(0).min(self.width as isize - 1) as usize;
+        let max_x = max_x.max(0).min(width as isize - 1) as usize;
         let min_y = min_y.max(0) as usize;
-        let max_y = max_y.max(0).min(self.height as isize - 1) as usize;
-
-        // Triangle entirely off-screen
+        let max_y = max_y.max(0).min(height as isize - 1) as usize;
         if min_x > max_x || min_y > max_y {
-            return;
+            return None;
         }
 
-        // --- Precompute barycentric denominator ---
-        // For vertices A(v0), B(v1), C(v2), the signed area * 2:
-        //   denom = (B.y - C.y)*(A.x - C.x) + (C.x - B.x)*(A.y - C.y)
         let denom = (v1[1] - v2[1]) * (v0[0] - v2[0]) + (v2[0] - v1[0]) * (v0[1] - v2[1]);
         if denom.abs() < 1e-12 {
-            return; // degenerate triangle
+            return None;
         }
-        let inv_denom = 1.0 / denom;
 
-        // --- Rasterize pixels in bounding box ---
-        for py in min_y..=max_y {
-            let pf_y = py as f64 + 0.5; // pixel center
-            for px in min_x..=max_x {
-                let pf_x = px as f64 + 0.5; // pixel center
+        Some(PreparedTriangle {
+            verts: tri.verts,
+            shaded,
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+            inv_denom: 1.0 / denom,
+        })
+    }
 
-                // Barycentric coordinates
-                let u =
-                    ((v1[1] - v2[1]) * (pf_x - v2[0]) + (v2[0] - v1[0]) * (pf_y - v2[1]))
-                        * inv_denom;
-                let v =
-                    ((v2[1] - v0[1]) * (pf_x - v2[0]) + (v0[0] - v2[0]) * (pf_y - v2[1]))
-                        * inv_denom;
-                let w = 1.0 - u - v;
+    #[cfg(test)]
+    fn rasterize_prepared_into_framebuffer(&mut self, tri: &PreparedTriangle) {
+        let rect = TileRect {
+            x0: tri.min_x,
+            y0: tri.min_y,
+            x1: tri.max_x,
+            y1: tri.max_y,
+        };
+        let tile = Self::render_tile(std::slice::from_ref(tri), &[0], rect);
+        self.blit_tile(tile);
+    }
 
-                // Inside test (with a tiny epsilon for edge cases)
-                if u >= -1e-6 && v >= -1e-6 && w >= -1e-6 {
-                    // Interpolate z
-                    let z = u * v0[2] + v * v1[2] + w * v2[2];
-                    self.set_pixel(px, py, z, shaded);
+    fn tile_rect(
+        tile_idx: usize,
+        tiles_x: usize,
+        tile_size: usize,
+        width: usize,
+        height: usize,
+    ) -> TileRect {
+        let tx = tile_idx % tiles_x;
+        let ty = tile_idx / tiles_x;
+        let x0 = tx * tile_size;
+        let y0 = ty * tile_size;
+        TileRect {
+            x0,
+            y0,
+            x1: (x0 + tile_size - 1).min(width - 1),
+            y1: (y0 + tile_size - 1).min(height - 1),
+        }
+    }
+
+    fn render_tile(
+        prepared: &[PreparedTriangle],
+        tri_indices: &[usize],
+        rect: TileRect,
+    ) -> TileResult {
+        let tile_w = rect.x1 - rect.x0 + 1;
+        let tile_h = rect.y1 - rect.y0 + 1;
+        let mut color = vec![[0, 0, 0]; tile_w * tile_h];
+        let mut depth = vec![f64::INFINITY; tile_w * tile_h];
+
+        for &tri_idx in tri_indices {
+            let tri = &prepared[tri_idx];
+            let min_x = tri.min_x.max(rect.x0);
+            let max_x = tri.max_x.min(rect.x1);
+            let min_y = tri.min_y.max(rect.y0);
+            let max_y = tri.max_y.min(rect.y1);
+            if min_x > max_x || min_y > max_y {
+                continue;
+            }
+
+            let [v0, v1, v2] = tri.verts;
+            for py in min_y..=max_y {
+                let pf_y = py as f64 + 0.5;
+                for px in min_x..=max_x {
+                    let pf_x = px as f64 + 0.5;
+                    let u = ((v1[1] - v2[1]) * (pf_x - v2[0]) + (v2[0] - v1[0]) * (pf_y - v2[1]))
+                        * tri.inv_denom;
+                    let v = ((v2[1] - v0[1]) * (pf_x - v2[0]) + (v0[0] - v2[0]) * (pf_y - v2[1]))
+                        * tri.inv_denom;
+                    let w = 1.0 - u - v;
+                    if u >= -1e-6 && v >= -1e-6 && w >= -1e-6 {
+                        let z = u * v0[2] + v * v1[2] + w * v2[2];
+                        let local_idx = (py - rect.y0) * tile_w + (px - rect.x0);
+                        if z < depth[local_idx] {
+                            depth[local_idx] = z;
+                            color[local_idx] = tri.shaded;
+                        }
+                    }
                 }
             }
+        }
+
+        TileResult { rect, color, depth }
+    }
+
+    fn blit_tile(&mut self, tile: TileResult) {
+        let tile_w = tile.rect.x1 - tile.rect.x0 + 1;
+        for local_y in 0..(tile.rect.y1 - tile.rect.y0 + 1) {
+            let dst_y = tile.rect.y0 + local_y;
+            let dst_start = dst_y * self.width + tile.rect.x0;
+            let src_start = local_y * tile_w;
+            let src_end = src_start + tile_w;
+            self.color[dst_start..dst_start + tile_w]
+                .copy_from_slice(&tile.color[src_start..src_end]);
+            self.depth[dst_start..dst_start + tile_w]
+                .copy_from_slice(&tile.depth[src_start..src_end]);
         }
     }
 
@@ -176,8 +372,12 @@ impl Framebuffer {
         let mut z_max = f64::NEG_INFINITY;
         for &d in &self.depth {
             if d < f64::INFINITY {
-                if d < z_min { z_min = d; }
-                if d > z_max { z_max = d; }
+                if d < z_min {
+                    z_min = d;
+                }
+                if d > z_max {
+                    z_max = d;
+                }
             }
         }
 
@@ -188,19 +388,44 @@ impl Framebuffer {
         }
 
         let inv_range = 1.0 / z_range;
-
-        for i in 0..self.depth.len() {
-            let d = self.depth[i];
-            if d >= f64::INFINITY {
-                continue; // background pixel — leave black
+        let len = self.depth.len();
+        let worker_count = Self::thread_count().min(len.max(1));
+        if worker_count <= 1 || len < 16_384 {
+            for i in 0..len {
+                let d = self.depth[i];
+                if d >= f64::INFINITY {
+                    continue;
+                }
+                let t = ((d - z_min) * inv_range).clamp(0.0, 1.0);
+                let blend = t * fog_strength;
+                let c = &mut self.color[i];
+                c[0] = (c[0] as f64 + (fog_color[0] as f64 - c[0] as f64) * blend) as u8;
+                c[1] = (c[1] as f64 + (fog_color[1] as f64 - c[1] as f64) * blend) as u8;
+                c[2] = (c[2] as f64 + (fog_color[2] as f64 - c[2] as f64) * blend) as u8;
             }
-            let t = ((d - z_min) * inv_range).clamp(0.0, 1.0);
-            let blend = t * fog_strength;
-            let c = &mut self.color[i];
-            c[0] = (c[0] as f64 + (fog_color[0] as f64 - c[0] as f64) * blend) as u8;
-            c[1] = (c[1] as f64 + (fog_color[1] as f64 - c[1] as f64) * blend) as u8;
-            c[2] = (c[2] as f64 + (fog_color[2] as f64 - c[2] as f64) * blend) as u8;
+            return;
         }
+
+        let chunk_size = len.div_ceil(worker_count);
+        let depth = &self.depth;
+        thread::scope(|scope| {
+            for (chunk_idx, color_chunk) in self.color.chunks_mut(chunk_size).enumerate() {
+                let start = chunk_idx * chunk_size;
+                let depth_chunk = &depth[start..start + color_chunk.len()];
+                scope.spawn(move || {
+                    for (d, c) in depth_chunk.iter().zip(color_chunk.iter_mut()) {
+                        if *d >= f64::INFINITY {
+                            continue;
+                        }
+                        let t = ((*d - z_min) * inv_range).clamp(0.0, 1.0);
+                        let blend = t * fog_strength;
+                        c[0] = (c[0] as f64 + (fog_color[0] as f64 - c[0] as f64) * blend) as u8;
+                        c[1] = (c[1] as f64 + (fog_color[1] as f64 - c[1] as f64) * blend) as u8;
+                        c[2] = (c[2] as f64 + (fog_color[2] as f64 - c[2] as f64) * blend) as u8;
+                    }
+                });
+            }
+        });
     }
 
     /// Draw a 3D line with Bresenham's algorithm and z-interpolation.
@@ -216,8 +441,8 @@ impl Framebuffer {
         // Skip lines where both endpoints are entirely off the same side of the screen.
         let w = self.width as isize;
         let h = self.height as isize;
-        if (x0 < 0 && x1 < 0) || (x0 >= w && x1 >= w) ||
-           (y0 < 0 && y1 < 0) || (y0 >= h && y1 >= h) {
+        if (x0 < 0 && x1 < 0) || (x0 >= w && x1 >= w) || (y0 < 0 && y1 < 0) || (y0 >= h && y1 >= h)
+        {
             return;
         }
 
@@ -323,14 +548,32 @@ impl Framebuffer {
     /// ratatui-image integration to send the framebuffer to the terminal via
     /// Sixel, Kitty, or other graphics protocols.
     pub fn to_rgb_image(&self) -> RgbImage {
-        let mut img = RgbImage::new(self.width as u32, self.height as u32);
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let c = self.color[y * self.width + x];
-                img.put_pixel(x as u32, y as u32, image::Rgb(c));
+        let pixel_count = self.color.len();
+        let mut bytes = vec![0u8; pixel_count * 3];
+        let worker_count = Self::thread_count().min(pixel_count.max(1));
+        if worker_count <= 1 || pixel_count < 16_384 {
+            for (src, dst) in self.color.iter().zip(bytes.chunks_exact_mut(3)) {
+                dst.copy_from_slice(src);
             }
+        } else {
+            let chunk_pixels = pixel_count.div_ceil(worker_count);
+            let colors = &self.color;
+            thread::scope(|scope| {
+                for (chunk_idx, byte_chunk) in bytes.chunks_mut(chunk_pixels * 3).enumerate() {
+                    let start_pixel = chunk_idx * chunk_pixels;
+                    let end_pixel = (start_pixel + byte_chunk.len() / 3).min(pixel_count);
+                    let color_chunk = &colors[start_pixel..end_pixel];
+                    scope.spawn(move || {
+                        for (src, dst) in color_chunk.iter().zip(byte_chunk.chunks_exact_mut(3)) {
+                            dst.copy_from_slice(src);
+                        }
+                    });
+                }
+            });
         }
-        img
+
+        RgbImage::from_raw(self.width as u32, self.height as u32, bytes)
+            .expect("framebuffer rgb byte length must match dimensions")
     }
 
     /// Draw a filled circle with a specific z-depth for z-buffer testing.
@@ -340,9 +583,13 @@ impl Framebuffer {
     /// callers can submit multiple concentric circles with varying z.
     pub fn draw_circle_z(&mut self, cx: f64, cy: f64, z: f64, radius: f64, color: [u8; 3]) {
         let ix_min = ((cx - radius).floor() as isize).max(0) as usize;
-        let ix_max = ((cx + radius).ceil() as isize).max(0).min(self.width as isize - 1) as usize;
+        let ix_max = ((cx + radius).ceil() as isize)
+            .max(0)
+            .min(self.width as isize - 1) as usize;
         let iy_min = ((cy - radius).floor() as isize).max(0) as usize;
-        let iy_max = ((cy + radius).ceil() as isize).max(0).min(self.height as isize - 1) as usize;
+        let iy_max = ((cy + radius).ceil() as isize)
+            .max(0)
+            .min(self.height as isize - 1) as usize;
 
         // Circle entirely off-screen
         if ix_min > ix_max || iy_min > iy_max {
@@ -443,23 +690,28 @@ pub fn framebuffer_to_widget(fb: &Framebuffer) -> Paragraph<'static> {
         // Case 2: top only → '▀' with fg=top, bg=Reset
         // Case 3: bottom only → '▄' with fg=bottom, bg=Reset
         #[derive(PartialEq, Clone, Copy)]
-        enum CellKind { Blank, Both([u8;3],[u8;3]), TopOnly([u8;3]), BotOnly([u8;3]) }
+        enum CellKind {
+            Blank,
+            Both([u8; 3], [u8; 3]),
+            TopOnly([u8; 3]),
+            BotOnly([u8; 3]),
+        }
 
         let mut run_text = String::new();
         let mut run_kind = CellKind::Blank;
         let mut run_started = false;
 
         let flush = |spans: &mut Vec<Span<'static>>, text: &str, kind: &CellKind| {
-            if text.is_empty() { return; }
+            if text.is_empty() {
+                return;
+            }
             let style = match kind {
                 CellKind::Blank => Style::default(),
                 CellKind::Both(top, bot) => Style::default()
                     .fg(Color::Rgb(top[0], top[1], top[2]))
                     .bg(Color::Rgb(bot[0], bot[1], bot[2])),
-                CellKind::TopOnly(top) => Style::default()
-                    .fg(Color::Rgb(top[0], top[1], top[2])),
-                CellKind::BotOnly(bot) => Style::default()
-                    .fg(Color::Rgb(bot[0], bot[1], bot[2])),
+                CellKind::TopOnly(top) => Style::default().fg(Color::Rgb(top[0], top[1], top[2])),
+                CellKind::BotOnly(bot) => Style::default().fg(Color::Rgb(bot[0], bot[1], bot[2])),
             };
             spans.push(Span::styled(text.to_string(), style));
         };
@@ -563,17 +815,16 @@ pub fn framebuffer_to_braille_widget(fb: &Framebuffer) -> Paragraph<'static> {
         let mut run_color: Option<[u8; 3]> = None;
         let mut run_started = false;
 
-        let flush =
-            |spans: &mut Vec<Span<'static>>, text: &str, color: &Option<[u8; 3]>| {
-                if text.is_empty() {
-                    return;
-                }
-                let style = match color {
-                    Some(c) => Style::default().fg(Color::Rgb(c[0], c[1], c[2])),
-                    None => Style::default(),
-                };
-                spans.push(Span::styled(text.to_string(), style));
+        let flush = |spans: &mut Vec<Span<'static>>, text: &str, color: &Option<[u8; 3]>| {
+            if text.is_empty() {
+                return;
+            }
+            let style = match color {
+                Some(c) => Style::default().fg(Color::Rgb(c[0], c[1], c[2])),
+                None => Style::default(),
             };
+            spans.push(Span::styled(text.to_string(), style));
+        };
 
         for tc in 0..term_cols {
             let px_base = tc * 2;
@@ -632,8 +883,7 @@ pub fn framebuffer_to_braille_widget(fb: &Framebuffer) -> Paragraph<'static> {
                 );
                 let cell_color = Some(avg);
 
-                let braille_char =
-                    char::from_u32(0x2800u32 + bits as u32).unwrap_or(' ');
+                let braille_char = char::from_u32(0x2800u32 + bits as u32).unwrap_or(' ');
 
                 if run_started && run_color == cell_color {
                     run_text.push(braille_char);
@@ -792,10 +1042,18 @@ mod tests {
         assert_eq!(quantize_channel(128, 8), 128);
         // 255 should quantize to a valid u8 (256 clamped to 255)
         let q255 = quantize_channel(255, 8);
-        assert!(q255 == 248 || q255 == 255, "unexpected quantize(255, 8): {}", q255);
+        assert!(
+            q255 == 248 || q255 == 255,
+            "unexpected quantize(255, 8): {}",
+            q255
+        );
         // 252 should round up to 248 or be clamped
         let q252 = quantize_channel(252, 8);
-        assert!(q252 == 248 || q252 == 255, "unexpected quantize(252, 8): {}", q252);
+        assert!(
+            q252 == 248 || q252 == 255,
+            "unexpected quantize(252, 8): {}",
+            q252
+        );
     }
 
     #[test]
@@ -836,14 +1094,21 @@ mod tests {
         fb.apply_depth_tint(fog, 0.5);
 
         // Near pixel (z=1, t=0.0) should stay unchanged
-        assert_eq!(fb.color[0], near_color, "nearest pixel should keep original color");
+        assert_eq!(
+            fb.color[0], near_color,
+            "nearest pixel should keep original color"
+        );
 
         // Far pixel (z=10, t=1.0) should be blended halfway toward fog
         // new = base + (fog - base) * 1.0 * 0.5
         // R: 200 + (40 - 200) * 0.5 = 200 - 80 = 120
         // G: 100 + (50 - 100) * 0.5 = 100 - 25 = 75
         // B:  50 + (70 -  50) * 0.5 =  50 + 10 = 60
-        assert_eq!(fb.color[1], [120, 75, 60], "farthest pixel should blend toward fog");
+        assert_eq!(
+            fb.color[1],
+            [120, 75, 60],
+            "farthest pixel should blend toward fog"
+        );
     }
 
     #[test]
@@ -859,7 +1124,15 @@ mod tests {
         fb.apply_depth_tint([40, 50, 70], 0.5);
 
         // Background pixels must remain [0,0,0]
-        assert_eq!(fb.color[2], [0, 0, 0], "background pixel at index 2 should stay black");
-        assert_eq!(fb.color[3], [0, 0, 0], "background pixel at index 3 should stay black");
+        assert_eq!(
+            fb.color[2],
+            [0, 0, 0],
+            "background pixel at index 2 should stay black"
+        );
+        assert_eq!(
+            fb.color[3],
+            [0, 0, 0],
+            "background pixel at index 3 should stay black"
+        );
     }
 }

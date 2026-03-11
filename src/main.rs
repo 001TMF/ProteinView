@@ -5,18 +5,18 @@ mod parser;
 mod render;
 mod ui;
 
-use std::io;
-use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
 use anyhow::Result;
 use clap::Parser;
 use crossterm::{
     event::KeyCode,
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::prelude::*;
 use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::prelude::*;
+use std::io;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use app::App;
 
@@ -41,12 +41,12 @@ struct Cli {
     #[arg(long, alias = "pixel")]
     hd: bool,
 
-    /// Color scheme: structure, chain, element, bfactor, rainbow
+    /// Color scheme: structure, plddt, chain, element, bfactor, rainbow
     #[arg(long, default_value = "structure")]
     color: String,
 
-    /// Visualization mode: backbone, wireframe
-    #[arg(long, default_value = "backbone")]
+    /// Visualization mode: cartoon, backbone, wireframe
+    #[arg(long, default_value = "cartoon")]
     mode: String,
 
     /// Fetch structure from RCSB PDB by ID
@@ -73,7 +73,9 @@ fn main() -> Result<()> {
 
     // Load protein structure
     let protein = parser::pdb::load_structure(&file_path)?;
-    eprintln!("Loaded: {} ({} chains, {} residues, {} atoms)",
+    let has_plddt = protein.has_plddt();
+    eprintln!(
+        "Loaded: {} ({} chains, {} residues, {} atoms)",
         protein.name,
         protein.chains.len(),
         protein.residue_count(),
@@ -81,9 +83,10 @@ fn main() -> Result<()> {
     );
 
     // Open log file if requested
-    let mut logfile: Option<std::fs::File> = cli.log.as_ref().map(|path| {
-        std::fs::File::create(path).expect("cannot create log file")
-    });
+    let mut logfile: Option<std::fs::File> = cli
+        .log
+        .as_ref()
+        .map(|path| std::fs::File::create(path).expect("cannot create log file"));
 
     // Get terminal dimensions before entering alternate screen
     let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
@@ -109,12 +112,30 @@ fn main() -> Result<()> {
     // input thread (which reads from stdin).
     let picker = ratatui_image::picker::Picker::from_query_stdio()
         .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
-    log!(logfile, "picker: protocol={:?} font_size={:?}",
-        picker.protocol_type(), picker.font_size());
+    log!(
+        logfile,
+        "picker: protocol={:?} font_size={:?}",
+        picker.protocol_type(),
+        picker.font_size()
+    );
 
     // Create app with actual terminal dimensions for dynamic zoom
-    let mut app = App::new(protein, cli.hd, term_cols, term_rows, picker);
-    log!(logfile, "app created: hd={} chains={} zoom={:.2}", app.hd_mode, app.protein.chains.len(), app.camera.zoom);
+    let mut app = App::new(
+        protein,
+        cli.hd,
+        render::color::ColorSchemeType::from_cli(&cli.color, has_plddt),
+        app::VizMode::from_cli(&cli.mode),
+        term_cols,
+        term_rows,
+        picker,
+    );
+    log!(
+        logfile,
+        "app created: hd={} chains={} zoom={:.2}",
+        app.hd_mode,
+        app.protein.chains.len(),
+        app.camera.zoom
+    );
 
     // Spawn dedicated input thread — decouples input from rendering so
     // quit always works even when HD rendering is slow
@@ -136,11 +157,17 @@ fn main() -> Result<()> {
             log!(logfile, "key: {:?}", key.code);
             match key.code {
                 KeyCode::Char('q') => app.should_quit = true,
-                KeyCode::Char('c') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => app.should_quit = true,
+                KeyCode::Char('c')
+                    if key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
+                    app.should_quit = true
+                }
                 KeyCode::Char('h') | KeyCode::Left => app.camera.rotate_y(-1.0),
                 KeyCode::Char('l') | KeyCode::Right => app.camera.rotate_y(1.0),
-                KeyCode::Char('j') | KeyCode::Down => app.camera.rotate_x(1.0),
-                KeyCode::Char('k') | KeyCode::Up => app.camera.rotate_x(-1.0),
+                KeyCode::Char('j') | KeyCode::Down => app.camera.rotate_x(-1.0),
+                KeyCode::Char('k') | KeyCode::Up => app.camera.rotate_x(1.0),
                 KeyCode::Char('u') => app.camera.rotate_z(-1.0),
                 KeyCode::Char('i') => app.camera.rotate_z(1.0),
                 KeyCode::Char('+') | KeyCode::Char('=') => app.camera.zoom_in(),
@@ -149,29 +176,41 @@ fn main() -> Result<()> {
                 KeyCode::Char('s') => app.camera.pan(0.0, -1.0),
                 KeyCode::Char('a') => app.camera.pan(-1.0, 0.0),
                 KeyCode::Char('d') => app.camera.pan(1.0, 0.0),
-                KeyCode::Char('r') => app.camera.reset(),
+                KeyCode::Char('r') => app.reset_camera(),
                 KeyCode::Char('c') => app.cycle_color(),
                 KeyCode::Char('v') => app.cycle_viz_mode(),
                 KeyCode::Char('m') => {
-                    app.hd_mode = !app.hd_mode;
-                    let (cols, rows) = crossterm::terminal::size().unwrap_or((term_cols, term_rows));
-                    app.recalculate_zoom(cols, rows);
-                },
+                    let (cols, rows) =
+                        crossterm::terminal::size().unwrap_or((term_cols, term_rows));
+                    app.toggle_hd_mode_preserve_view(cols, rows);
+                }
+                KeyCode::Char('/') => {
+                    let (cols, rows) =
+                        crossterm::terminal::size().unwrap_or((term_cols, term_rows));
+                    let view_cols = if app.show_interface {
+                        cols.saturating_sub(ui::interface_panel::SIDEBAR_WIDTH)
+                    } else {
+                        cols
+                    };
+                    app.focus_next_chain(view_cols, rows);
+                }
                 KeyCode::Char('[') => app.prev_chain(),
                 KeyCode::Char(']') => app.next_chain(),
                 KeyCode::Char(' ') => app.camera.auto_rotate = !app.camera.auto_rotate,
                 KeyCode::Char('f') => app.toggle_interface(),
                 KeyCode::Char('?') => app.show_help = !app.show_help,
-                KeyCode::Esc => { if app.show_help { app.show_help = false; } },
+                KeyCode::Esc => {
+                    if app.show_help {
+                        app.show_help = false;
+                    }
+                }
                 _ => {}
             }
         }
 
-        if app.should_quit { break; }
-
-        // Ensure ribbon mesh cache is fresh (rebuilds only when color scheme changes).
-        // Must happen outside terminal.draw() since ribbon_mesh() needs &mut self.
-        app.ribbon_mesh();
+        if app.should_quit {
+            break;
+        }
 
         // Adaptive frame skipping: if the previous draw took longer than the
         // tick rate, skip frames proportionally.  User input always forces a
@@ -186,8 +225,15 @@ fn main() -> Result<()> {
         // Render
         frame_count += 1;
         if frame_count <= 3 || frame_count % 300 == 0 {
-            log!(logfile, "frame {} render start (hd={} viz={:?} interface={} last_draw={:?})",
-                frame_count, app.hd_mode, app.viz_mode, app.show_interface, last_draw_duration);
+            log!(
+                logfile,
+                "frame {} render start (hd={} viz={:?} interface={} last_draw={:?})",
+                frame_count,
+                app.hd_mode,
+                app.viz_mode,
+                app.show_interface,
+                last_draw_duration
+            );
         }
 
         let draw_start = Instant::now();
@@ -219,10 +265,10 @@ fn main() -> Result<()> {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(1),     // Header
-                    Constraint::Min(3),        // Viewport
-                    Constraint::Length(2),      // Status bar
-                    Constraint::Length(1),      // Help bar
+                    Constraint::Length(1), // Header
+                    Constraint::Min(3),    // Viewport
+                    Constraint::Length(2), // Status bar
+                    Constraint::Length(1), // Help bar
                 ])
                 .split(main_area);
 

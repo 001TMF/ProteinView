@@ -336,6 +336,9 @@ pub fn generate_ribbon_mesh(
             MoleculeType::RNA | MoleculeType::DNA => {
                 generate_nucleic_acid_ribbon(chain, color_scheme, &mut triangles);
             }
+            MoleculeType::SmallMolecule => {
+                // Small molecule rendering handled separately; skip in ribbon pass
+            }
         }
     }
 

@@ -2,7 +2,7 @@ use ratatui::symbols::Marker;
 use ratatui::widgets::canvas::{Canvas, Context, Line};
 
 use crate::app::VizMode;
-use crate::model::protein::{MoleculeType, Protein};
+use crate::model::protein::{LigandType, MoleculeType, Protein};
 use crate::render::camera::Camera;
 use crate::render::color::ColorScheme;
 
@@ -65,6 +65,7 @@ pub fn render_protein<'a>(
     viz_mode: VizMode,
     width: f64,
     height: f64,
+    show_ligands: bool,
 ) -> Canvas<'a, impl Fn(&mut Context<'_>) + 'a> {
     Canvas::default()
         .marker(Marker::Braille)
@@ -78,6 +79,10 @@ pub fn render_protein<'a>(
                 VizMode::Wireframe => {
                     render_wireframe(ctx, protein, camera, color_scheme);
                 }
+            }
+
+            if show_ligands {
+                render_ligands(ctx, protein, camera, color_scheme);
             }
         })
 }
@@ -162,6 +167,7 @@ fn render_wireframe(
                     let n = res_next.atoms.iter().find(|a| a.name.trim() == "N");
                     (c, n)
                 }
+                MoleculeType::SmallMolecule => (None, None),
             };
 
             if let (Some(a1), Some(a2)) = (from_atom, to_atom) {
@@ -169,6 +175,52 @@ fn render_wireframe(
                 let p2 = camera.project(a2.x, a2.y, a2.z);
                 let color = color_scheme.atom_color(a1, res_curr, chain);
                 draw_thick_line(ctx, p1.x, p1.y, p2.x, p2.y, color, &offsets);
+            }
+        }
+    }
+}
+
+/// Render small molecules: dots and lines for ligands, single dots for ions.
+fn render_ligands(
+    ctx: &mut Context<'_>,
+    protein: &Protein,
+    camera: &Camera,
+    color_scheme: &ColorScheme,
+) {
+    let offsets: [f64; 1] = [0.0];
+
+    for ligand in &protein.ligands {
+        match ligand.ligand_type {
+            LigandType::Ion => {
+                // Single dot for ions — draw as a small cross for visibility
+                if let Some(atom) = ligand.atoms.first() {
+                    let proj = camera.project(atom.x, atom.y, atom.z);
+                    let color = color_scheme.ligand_atom_color(atom, ligand);
+                    let sz = 0.5;
+                    ctx.draw(&Line { x1: proj.x - sz, y1: proj.y, x2: proj.x + sz, y2: proj.y, color });
+                    ctx.draw(&Line { x1: proj.x, y1: proj.y - sz, x2: proj.x, y2: proj.y + sz, color });
+                }
+            }
+            LigandType::Ligand => {
+                // Project all atoms
+                let projected: Vec<_> = ligand.atoms.iter()
+                    .map(|a| {
+                        let proj = camera.project(a.x, a.y, a.z);
+                        let color = color_scheme.ligand_atom_color(a, ligand);
+                        (a, proj, color)
+                    })
+                    .collect();
+
+                // Draw intra-ligand bonds
+                for i in 0..projected.len() {
+                    for j in (i + 1)..projected.len() {
+                        let (a1, p1, color) = &projected[i];
+                        let (a2, p2, _) = &projected[j];
+                        if atoms_bonded_3d(a1.x, a1.y, a1.z, a2.x, a2.y, a2.z) {
+                            draw_thick_line(ctx, p1.x, p1.y, p2.x, p2.y, *color, &offsets);
+                        }
+                    }
+                }
             }
         }
     }

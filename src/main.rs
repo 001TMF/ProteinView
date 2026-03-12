@@ -73,11 +73,16 @@ fn main() -> Result<()> {
 
     // Load protein structure
     let protein = parser::pdb::load_structure(&file_path)?;
-    eprintln!("Loaded: {} ({} chains, {} residues, {} atoms)",
+    eprintln!("Loaded: {} ({} chains, {} residues, {} atoms{})",
         protein.name,
         protein.chains.len(),
         protein.residue_count(),
         protein.atom_count(),
+        if protein.ligands.is_empty() {
+            String::new()
+        } else {
+            format!(", {} ligands", protein.ligand_count())
+        },
     );
 
     // Open log file if requested
@@ -161,6 +166,7 @@ fn main() -> Result<()> {
                 KeyCode::Char(']') => app.next_chain(),
                 KeyCode::Char(' ') => app.camera.auto_rotate = !app.camera.auto_rotate,
                 KeyCode::Char('f') => app.toggle_interface(),
+                KeyCode::Char('g') => app.toggle_ligands(),
                 KeyCode::Char('?') => app.show_help = !app.show_help,
                 KeyCode::Esc => { if app.show_help { app.show_help = false; } },
                 _ => {}

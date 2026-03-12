@@ -94,6 +94,20 @@ pub fn render_interface_panel(
         Span::styled(" Ag other", Style::default().fg(Color::DarkGray)),
     ]));
 
+    if summary_lines.iter().any(|l| l.contains("Ligand") || l.contains("Ion")) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled("\u{2588}", Style::default().fg(Color::Rgb(255, 0, 255))),
+            Span::styled(" Ligand", Style::default().fg(Color::DarkGray)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled("\u{2588}", Style::default().fg(Color::Rgb(0, 255, 255))),
+            Span::styled(" Ion", Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+
     let panel = Paragraph::new(lines)
         .block(
             Block::default()

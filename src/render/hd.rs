@@ -1,5 +1,5 @@
 use crate::app::VizMode;
-use crate::model::protein::{MoleculeType, Protein};
+use crate::model::protein::{LigandType, MoleculeType, Protein};
 use crate::render::camera::Camera;
 use crate::render::color::{color_to_rgb, ColorScheme};
 use crate::render::framebuffer::{default_light_dir, Framebuffer, Triangle};
@@ -18,6 +18,7 @@ pub fn render_hd_framebuffer(
     width: f64,
     height: f64,
     mesh: &[RibbonTriangle],
+    show_ligands: bool,
 ) -> Framebuffer {
     let px_w = width as usize;
     let px_h = height as usize;
@@ -56,6 +57,11 @@ pub fn render_hd_framebuffer(
         VizMode::Wireframe => {
             render_wireframe_fb(&mut fb, protein, camera, color_scheme, half_w, half_h);
         }
+    }
+
+    // Render small molecules as ball-and-stick overlay
+    if show_ligands {
+        render_ligands_fb(&mut fb, protein, camera, color_scheme, half_w, half_h);
     }
 
     // Post-pass: blend all rasterized pixels toward a cool blue-gray fog color
@@ -192,6 +198,7 @@ fn render_wireframe_fb(
                     let n = res_next.atoms.iter().find(|a| a.name.trim() == "N");
                     (c, n)
                 }
+                MoleculeType::SmallMolecule => (None, None),
             };
 
             if let (Some(a1), Some(a2)) = (from_atom, to_atom) {
@@ -201,6 +208,67 @@ fn render_wireframe_fb(
                 let px2 = to_pixel(p2.x, p2.y, p2.z, half_w, half_h);
                 let color = color_to_rgb(color_scheme.atom_color(a1, res_curr, chain));
                 fb.draw_thick_line_3d(px1, px2, color, 1.5);
+            }
+        }
+    }
+}
+
+/// Render small molecules: ball-and-stick for ligands, spheres for ions.
+fn render_ligands_fb(
+    fb: &mut Framebuffer,
+    protein: &Protein,
+    camera: &Camera,
+    color_scheme: &ColorScheme,
+    half_w: f64,
+    half_h: f64,
+) {
+    for ligand in &protein.ligands {
+        match ligand.ligand_type {
+            LigandType::Ion => {
+                // Single sphere for ions (larger radius)
+                if let Some(atom) = ligand.atoms.first() {
+                    let p = camera.project(atom.x, atom.y, atom.z);
+                    let px = to_pixel(p.x, p.y, p.z, half_w, half_h);
+                    let color = color_to_rgb(color_scheme.ligand_atom_color(atom, ligand));
+                    fb.draw_circle_z(px[0], px[1], px[2], 4.5, color);
+                }
+            }
+            LigandType::Ligand => {
+                // Ball-and-stick: atom spheres + bond sticks
+                let projected: Vec<_> = ligand
+                    .atoms
+                    .iter()
+                    .map(|a| {
+                        let p = camera.project(a.x, a.y, a.z);
+                        let px = to_pixel(p.x, p.y, p.z, half_w, half_h);
+                        let color = color_to_rgb(color_scheme.ligand_atom_color(a, ligand));
+                        (a, px, color)
+                    })
+                    .collect();
+
+                // Draw atom spheres (radius varies by element)
+                for (atom, px, color) in &projected {
+                    let radius = match atom.element.trim() {
+                        "H" => 1.5,
+                        "C" => 2.5,
+                        "N" | "O" | "S" => 2.8,
+                        "P" => 3.0,
+                        "FE" | "Fe" | "ZN" | "Zn" | "MG" | "Mg" => 3.5,
+                        _ => 2.5,
+                    };
+                    fb.draw_circle_z(px[0], px[1], px[2], radius, *color);
+                }
+
+                // Draw bonds between atoms within 1.9 A
+                for i in 0..projected.len() {
+                    for j in (i + 1)..projected.len() {
+                        let (a1, p1, c1) = &projected[i];
+                        let (a2, p2, _) = &projected[j];
+                        if atoms_bonded_3d(a1.x, a1.y, a1.z, a2.x, a2.y, a2.z) {
+                            fb.draw_thick_line_3d(*p1, *p2, *c1, 1.5);
+                        }
+                    }
+                }
             }
         }
     }

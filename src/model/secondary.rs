@@ -458,6 +458,7 @@ mod tests {
                     x: 0.0, y: 0.0, z: 0.0,
                     b_factor: 0.0,
                     is_backbone: true,
+                    is_hetero: false,
                 }],
                 secondary_structure: SecondaryStructure::Coil,
             });
@@ -465,6 +466,7 @@ mod tests {
         let mut protein = Protein {
             name: "test".to_string(),
             chains: vec![Chain { id: "L".to_string(), residues, molecule_type: MoleculeType::Protein }],
+            ligands: Vec::new(),
         };
 
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/1ZVH.cif");

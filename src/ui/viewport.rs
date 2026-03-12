@@ -25,6 +25,7 @@ pub fn render_viewport(frame: &mut Frame, area: Rect, app: &App) {
             app.viz_mode,
             width,
             height,
+            app.show_ligands,
         );
 
         frame.render_widget(canvas, area);
@@ -63,6 +64,7 @@ fn render_hd_viewport(frame: &mut Frame, area: Rect, app: &App) {
         px_w,
         px_h,
         &app.mesh_cache,
+        app.show_ligands,
     );
 
     // If the terminal supports a real graphics protocol, convert the

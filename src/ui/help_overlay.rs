@@ -8,7 +8,7 @@ use ratatui::Frame;
 pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
     // Center the popup (60x20)
     let popup_width = 60u16.min(area.width - 4);
-    let popup_height = 20u16.min(area.height - 4);
+    let popup_height = 21u16.min(area.height - 4);
     let x = (area.width - popup_width) / 2;
     let y = (area.height - popup_height) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -28,6 +28,7 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from(vec![Span::styled("  v          ", Style::default().fg(Color::Yellow)), Span::raw("Cycle viz mode")]),
         Line::from(vec![Span::styled("  m          ", Style::default().fg(Color::Yellow)), Span::raw("Toggle Braille / HD")]),
         Line::from(vec![Span::styled("  [ / ]      ", Style::default().fg(Color::Yellow)), Span::raw("Prev / next chain")]),
+        Line::from(vec![Span::styled("  g          ", Style::default().fg(Color::Yellow)), Span::raw("Toggle ligand visibility")]),
         Line::from(vec![Span::styled("  Space      ", Style::default().fg(Color::Yellow)), Span::raw("Toggle auto-rotation")]),
         Line::from(vec![Span::styled("  ?          ", Style::default().fg(Color::Yellow)), Span::raw("Toggle this help")]),
         Line::from(vec![Span::styled("  q          ", Style::default().fg(Color::Yellow)), Span::raw("Quit")]),

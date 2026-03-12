@@ -17,6 +17,23 @@ pub struct Contact {
     pub min_distance: f64,
 }
 
+/// A contact between a ligand and a polymer residue.
+#[derive(Debug, Clone)]
+pub struct LigandContact {
+    pub ligand_idx: usize,
+    pub chain_idx: usize,
+    pub residue_idx: usize,
+    pub min_distance: f64,
+}
+
+/// Binding pocket analysis for all ligands.
+#[derive(Debug, Clone)]
+pub struct BindingPocketAnalysis {
+    pub contacts: Vec<LigandContact>,
+    /// Per-ligand: set of (chain_idx, residue_idx) forming the binding pocket.
+    pub pockets: Vec<HashSet<(usize, usize)>>,
+}
+
 /// Full interface analysis result.
 #[derive(Debug, Clone)]
 pub struct InterfaceAnalysis {
@@ -28,6 +45,7 @@ pub struct InterfaceAnalysis {
     pub chain_interface_counts: Vec<usize>,
     /// Total number of unique interface residues across all chains.
     pub total_interface_residues: usize,
+    pub binding_pockets: Option<BindingPocketAnalysis>,
 }
 
 /// Squared Euclidean distance between two atoms.
@@ -116,7 +134,48 @@ pub fn analyze_interface(protein: &Protein, cutoff: f64) -> InterfaceAnalysis {
         interface_residues,
         chain_interface_counts,
         total_interface_residues,
+        binding_pockets: None,
     }
+}
+
+/// Analyze ligand binding pockets: find polymer residues within cutoff of each ligand.
+pub fn analyze_binding_pockets(protein: &Protein, cutoff: f64) -> BindingPocketAnalysis {
+    let cutoff_sq = cutoff * cutoff;
+    let mut contacts: Vec<LigandContact> = Vec::new();
+    let mut pockets: Vec<HashSet<(usize, usize)>> = vec![HashSet::new(); protein.ligands.len()];
+
+    for (li, ligand) in protein.ligands.iter().enumerate() {
+        for (ci, chain) in protein.chains.iter().enumerate() {
+            for (ri, residue) in chain.residues.iter().enumerate() {
+                let mut min_d_sq = f64::MAX;
+                let mut found = false;
+
+                for latom in &ligand.atoms {
+                    if latom.element.trim() == "H" { continue; }
+                    for ratom in &residue.atoms {
+                        if ratom.element.trim() == "H" { continue; }
+                        let d = dist_sq(latom.x, latom.y, latom.z, ratom.x, ratom.y, ratom.z);
+                        if d < min_d_sq { min_d_sq = d; }
+                        if d <= cutoff_sq { found = true; }
+                    }
+                }
+
+                if found {
+                    contacts.push(LigandContact {
+                        ligand_idx: li,
+                        chain_idx: ci,
+                        residue_idx: ri,
+                        min_distance: min_d_sq.sqrt(),
+                    });
+                    pockets[li].insert((ci, ri));
+                }
+            }
+        }
+    }
+
+    contacts.sort_by(|a, b| a.min_distance.partial_cmp(&b.min_distance).unwrap_or(std::cmp::Ordering::Equal));
+
+    BindingPocketAnalysis { contacts, pockets }
 }
 
 impl InterfaceAnalysis {
@@ -236,6 +295,55 @@ impl InterfaceAnalysis {
             }
         }
 
+        // Ligand binding pocket summary.
+        if let Some(ref bp) = self.binding_pockets {
+            if !bp.contacts.is_empty() {
+                lines.push(String::new());
+                lines.push("Ligand Contacts".to_string());
+
+                for (li, ligand) in protein.ligands.iter().enumerate() {
+                    let pocket_size = bp.pockets.get(li).map(|p| p.len()).unwrap_or(0);
+                    if pocket_size == 0 { continue; }
+
+                    let min_dist = bp.contacts.iter()
+                        .filter(|c| c.ligand_idx == li)
+                        .map(|c| c.min_distance)
+                        .fold(f64::MAX, f64::min);
+
+                    let type_label = match ligand.ligand_type {
+                        crate::model::protein::LigandType::Ion => "Ion",
+                        crate::model::protein::LigandType::Ligand => "Ligand",
+                    };
+
+                    lines.push(format!(
+                        "{} {} ({}:{}): {} res, min {:.1}\u{00C5}",
+                        type_label,
+                        ligand.name,
+                        ligand.chain_id,
+                        ligand.seq_num,
+                        pocket_size,
+                        min_dist,
+                    ));
+
+                    // Top 3 closest residues
+                    let mut pocket_contacts: Vec<_> = bp.contacts.iter()
+                        .filter(|c| c.ligand_idx == li)
+                        .collect();
+                    pocket_contacts.sort_by(|a, b| a.min_distance.partial_cmp(&b.min_distance).unwrap_or(std::cmp::Ordering::Equal));
+                    let top_n = 3.min(pocket_contacts.len());
+                    let labels: Vec<String> = pocket_contacts[..top_n].iter()
+                        .map(|c| {
+                            let res = &protein.chains[c.chain_idx].residues[c.residue_idx];
+                            format!("{}:{}{} ({:.1}\u{00C5})", protein.chains[c.chain_idx].id, res.name, res.seq_num, c.min_distance)
+                        })
+                        .collect();
+                    if !labels.is_empty() {
+                        lines.push(format!("  {}", labels.join(", ")));
+                    }
+                }
+            }
+        }
+
         lines
     }
 }
@@ -258,6 +366,7 @@ mod tests {
                 z,
                 b_factor: 0.0,
                 is_backbone: true,
+                is_hetero: false,
             }],
             secondary_structure: SecondaryStructure::Coil,
         }
@@ -284,6 +393,7 @@ mod tests {
                     molecule_type: MoleculeType::Protein,
                 },
             ],
+            ligands: Vec::new(),
         }
     }
 
@@ -354,6 +464,7 @@ mod tests {
                             z: 0.0,
                             b_factor: 0.0,
                             is_backbone: false,
+                            is_hetero: false,
                         }],
                         secondary_structure: SecondaryStructure::Coil,
                     }],
@@ -372,12 +483,14 @@ mod tests {
                             z: 0.0,
                             b_factor: 0.0,
                             is_backbone: false,
+                            is_hetero: false,
                         }],
                         secondary_structure: SecondaryStructure::Coil,
                     }],
                     molecule_type: MoleculeType::Protein,
                 },
             ],
+            ligands: Vec::new(),
         };
 
         let analysis = analyze_interface(&protein, 4.5);
@@ -409,6 +522,7 @@ mod tests {
         let protein = Protein {
             name: "empty".to_string(),
             chains: vec![],
+            ligands: Vec::new(),
         };
         let analysis = analyze_interface(&protein, 4.5);
 
@@ -417,5 +531,69 @@ mod tests {
         let lines = analysis.summary(&protein);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("no inter-chain contacts"));
+    }
+
+    #[test]
+    fn test_binding_pocket_detection() {
+        use crate::model::protein::{Ligand, LigandType};
+
+        let mut protein = two_chain_protein();
+        // Add a ligand near chain A residue 0 (at 0,0,0)
+        protein.ligands.push(Ligand {
+            name: "HEM".to_string(),
+            chain_id: "A".to_string(),
+            seq_num: 100,
+            atoms: vec![Atom {
+                name: "FE".to_string(),
+                element: "Fe".to_string(),
+                x: 2.0, y: 0.0, z: 0.0,
+                b_factor: 0.0,
+                is_backbone: false,
+                is_hetero: true,
+            }],
+            ligand_type: LigandType::Ligand,
+        });
+
+        let bp = analyze_binding_pockets(&protein, 4.5);
+        assert_eq!(bp.pockets.len(), 1);
+        // Should detect chain A residue 0 (at 0,0,0) as in pocket (dist = 2.0)
+        assert!(bp.pockets[0].contains(&(0, 0)));
+        // Should also detect chain B residue 0 (at 3,0,0) as in pocket (dist = 1.0)
+        assert!(bp.pockets[0].contains(&(1, 0)));
+        // Chain A residue 1 (at 10,0,0) should NOT be in pocket
+        assert!(!bp.pockets[0].contains(&(0, 1)));
+    }
+
+    #[test]
+    fn test_binding_pocket_empty_ligands() {
+        let protein = two_chain_protein(); // has no ligands
+        let bp = analyze_binding_pockets(&protein, 4.5);
+        assert!(bp.contacts.is_empty());
+        assert!(bp.pockets.is_empty());
+    }
+
+    #[test]
+    fn test_binding_pocket_ion() {
+        use crate::model::protein::{Ligand, LigandType};
+
+        let mut protein = two_chain_protein();
+        protein.ligands.push(Ligand {
+            name: "ZN".to_string(),
+            chain_id: "A".to_string(),
+            seq_num: 200,
+            atoms: vec![Atom {
+                name: "ZN".to_string(),
+                element: "Zn".to_string(),
+                x: 1.0, y: 0.0, z: 0.0,
+                b_factor: 0.0,
+                is_backbone: false,
+                is_hetero: true,
+            }],
+            ligand_type: LigandType::Ion,
+        });
+
+        let bp = analyze_binding_pockets(&protein, 4.5);
+        assert!(!bp.contacts.is_empty());
+        assert!(bp.pockets[0].contains(&(0, 0))); // chain A res 0 at origin, dist 1.0
     }
 }

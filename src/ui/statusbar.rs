@@ -27,11 +27,23 @@ pub fn render_statusbar(frame: &mut Frame, area: Rect, app: &App) {
     // Render the actual status info on the next line if area has height > 1
     if area.height > 1 {
         let info_area = Rect::new(area.x, area.y + 1, area.width, 1);
-        let info = Paragraph::new(Line::from(vec![
+        // Build spans dynamically
+        let mut spans = vec![
             Span::styled("│ ", Style::default().fg(Color::DarkGray)),
             Span::styled(&chain_info, Style::default().fg(Color::Cyan)),
             Span::styled("│ ", Style::default().fg(Color::DarkGray)),
             Span::styled(format!("{} res ", res_count), Style::default().fg(Color::White)),
+        ];
+
+        if app.protein.ligand_count() > 0 {
+            spans.push(Span::styled("│ ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                format!("{} ligands ", app.protein.ligand_count()),
+                Style::default().fg(Color::Rgb(255, 0, 255)),
+            ));
+        }
+
+        spans.extend_from_slice(&[
             Span::styled("│ ", Style::default().fg(Color::DarkGray)),
             Span::styled(app.viz_mode.name(), Style::default().fg(Color::Green)),
             Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
@@ -39,7 +51,9 @@ pub fn render_statusbar(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
             Span::styled(render_mode, Style::default().fg(Color::Magenta)),
             Span::raw(" "),
-        ]));
+        ]);
+
+        let info = Paragraph::new(Line::from(spans));
         frame.render_widget(info, info_area);
     }
 }

@@ -1,6 +1,6 @@
 use ratatui_image::picker::Picker;
 
-use crate::model::interface::{analyze_interface, InterfaceAnalysis};
+use crate::model::interface::{analyze_interface, analyze_binding_pockets, InterfaceAnalysis};
 use crate::model::protein::Protein;
 use crate::render::camera::Camera;
 use crate::render::color::{ColorScheme, ColorSchemeType};
@@ -41,6 +41,7 @@ pub struct App {
     pub current_chain: usize,
     pub hd_mode: bool,
     pub show_help: bool,
+    pub show_ligands: bool,
     pub show_interface: bool,
     pub interface_analysis: InterfaceAnalysis,
     pub should_quit: bool,
@@ -83,7 +84,13 @@ impl App {
         camera.zoom = auto_zoom;
 
         // Pre-compute interface analysis (4.5A cutoff)
-        let interface_analysis = analyze_interface(&protein, 4.5);
+        let interface_analysis = {
+            let mut ia = analyze_interface(&protein, 4.5);
+            if !protein.ligands.is_empty() {
+                ia.binding_pockets = Some(analyze_binding_pockets(&protein, 4.5));
+            }
+            ia
+        };
 
         let color_scheme = ColorScheme::new(ColorSchemeType::Structure, total_residues);
         let mesh_cache = generate_ribbon_mesh(&protein, &color_scheme);
@@ -96,6 +103,7 @@ impl App {
             current_chain: 0,
             hd_mode,
             show_help: false,
+            show_ligands: true,
             show_interface: false,
             interface_analysis,
             should_quit: false,
@@ -136,6 +144,10 @@ impl App {
             );
             self.mesh_dirty = true;
         }
+    }
+
+    pub fn toggle_ligands(&mut self) {
+        self.show_ligands = !self.show_ligands;
     }
 
     /// Get the cached ribbon mesh, regenerating if dirty.

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use ratatui::style::Color;
 use crate::model::interface::InterfaceAnalysis;
-use crate::model::protein::{Atom, Chain, Residue, SecondaryStructure};
+use crate::model::protein::{Atom, Chain, Ligand, LigandType, Residue, SecondaryStructure};
 
 /// Available color schemes
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -119,7 +119,7 @@ impl ColorScheme {
     }
 
     /// CPK-style element coloring
-    fn element_color(atom: &Atom) -> Color {
+    pub fn element_color(atom: &Atom) -> Color {
         match atom.element.trim() {
             "C" => Color::Rgb(144, 144, 144),
             "N" => Color::Rgb(48, 80, 248),
@@ -128,7 +128,48 @@ impl ColorScheme {
             "H" => Color::Rgb(255, 255, 255),
             "P" => Color::Rgb(255, 128, 0),
             "FE" | "Fe" => Color::Rgb(224, 102, 51),
+            "MG" | "Mg" => Color::Rgb(0, 180, 0),        // Magnesium — green
+            "ZN" | "Zn" => Color::Rgb(125, 128, 176),    // Zinc — blue-gray
+            "CA" | "Ca" => Color::Rgb(61, 255, 0),       // Calcium — green
+            "MN" | "Mn" => Color::Rgb(156, 122, 199),    // Manganese — purple
+            "CO" | "Co" => Color::Rgb(240, 144, 160),    // Cobalt — pink
+            "CU" | "Cu" => Color::Rgb(200, 128, 51),     // Copper — brown-orange
+            "NI" | "Ni" => Color::Rgb(80, 208, 80),      // Nickel — green
+            "CL" | "Cl" => Color::Rgb(31, 240, 31),      // Chlorine — green
+            "BR" | "Br" => Color::Rgb(166, 41, 41),      // Bromine — dark red
             _ => Color::Rgb(200, 200, 200),
+        }
+    }
+
+    /// Get base color for a ligand based on current scheme.
+    pub fn ligand_color(&self, ligand: &Ligand) -> Color {
+        match self.scheme_type {
+            ColorSchemeType::Structure => match ligand.ligand_type {
+                LigandType::Ligand => Color::Rgb(255, 0, 255),   // magenta for ligands
+                LigandType::Ion => Color::Rgb(0, 255, 255),      // cyan for ions
+            },
+            ColorSchemeType::Element => Color::Rgb(144, 144, 144), // overridden per-atom
+            ColorSchemeType::BFactor => {
+                let avg_b = if ligand.atoms.is_empty() {
+                    0.0
+                } else {
+                    ligand.atoms.iter().map(|a| a.b_factor).sum::<f64>() / ligand.atoms.len() as f64
+                };
+                let t = ((avg_b - 5.0) / 75.0).clamp(0.0, 1.0);
+                let r = (t * 255.0) as u8;
+                let b = ((1.0 - t) * 255.0) as u8;
+                Color::Rgb(r, 0, b)
+            },
+            ColorSchemeType::Chain | ColorSchemeType::Rainbow => Color::Rgb(255, 0, 255),
+            ColorSchemeType::Interface => Color::Rgb(255, 255, 255), // bright white to stand out
+        }
+    }
+
+    /// Get color for a specific atom within a ligand.
+    pub fn ligand_atom_color(&self, atom: &Atom, ligand: &Ligand) -> Color {
+        match self.scheme_type {
+            ColorSchemeType::Element => Self::element_color(atom),
+            _ => self.ligand_color(ligand),
         }
     }
 
@@ -224,7 +265,7 @@ fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::protein::{is_nucleotide, Residue, SecondaryStructure};
+    use crate::model::protein::{is_nucleotide, LigandType, Residue, SecondaryStructure};
 
     /// Build a minimal residue for testing color assignment.
     fn make_residue(name: &str, ss: SecondaryStructure) -> Residue {
@@ -368,5 +409,81 @@ mod tests {
         let scheme = ColorScheme::new(ColorSchemeType::Structure, 100);
         let r = make_residue("LEU", SecondaryStructure::Coil);
         assert_eq!(scheme.structure_color(&r), Color::Rgb(0, 204, 0));
+    }
+
+    // ---- ligand coloring ----
+
+    #[test]
+    fn ligand_color_structure_magenta() {
+        let scheme = ColorScheme::new(ColorSchemeType::Structure, 100);
+        let ligand = crate::model::protein::Ligand {
+            name: "HEM".to_string(),
+            chain_id: "A".to_string(),
+            seq_num: 1,
+            atoms: vec![],
+            ligand_type: LigandType::Ligand,
+        };
+        assert_eq!(scheme.ligand_color(&ligand), Color::Rgb(255, 0, 255));
+    }
+
+    #[test]
+    fn ligand_color_ion_cyan() {
+        let scheme = ColorScheme::new(ColorSchemeType::Structure, 100);
+        let ligand = crate::model::protein::Ligand {
+            name: "ZN".to_string(),
+            chain_id: "A".to_string(),
+            seq_num: 1,
+            atoms: vec![],
+            ligand_type: LigandType::Ion,
+        };
+        assert_eq!(scheme.ligand_color(&ligand), Color::Rgb(0, 255, 255));
+    }
+
+    #[test]
+    fn ligand_atom_color_element_mode() {
+        let scheme = ColorScheme::new(ColorSchemeType::Element, 100);
+        let atom = Atom {
+            name: "FE".to_string(),
+            element: "Fe".to_string(),
+            x: 0.0, y: 0.0, z: 0.0,
+            b_factor: 0.0,
+            is_backbone: false,
+            is_hetero: true,
+        };
+        let ligand = crate::model::protein::Ligand {
+            name: "HEM".to_string(),
+            chain_id: "A".to_string(),
+            seq_num: 1,
+            atoms: vec![],
+            ligand_type: LigandType::Ligand,
+        };
+        // In Element mode, should use element-based CPK color for Fe
+        assert_eq!(scheme.ligand_atom_color(&atom, &ligand), Color::Rgb(224, 102, 51));
+    }
+
+    #[test]
+    fn element_color_zinc() {
+        let atom = Atom {
+            name: "ZN".to_string(),
+            element: "Zn".to_string(),
+            x: 0.0, y: 0.0, z: 0.0,
+            b_factor: 0.0,
+            is_backbone: false,
+            is_hetero: true,
+        };
+        assert_eq!(ColorScheme::element_color(&atom), Color::Rgb(125, 128, 176));
+    }
+
+    #[test]
+    fn element_color_magnesium() {
+        let atom = Atom {
+            name: "MG".to_string(),
+            element: "Mg".to_string(),
+            x: 0.0, y: 0.0, z: 0.0,
+            b_factor: 0.0,
+            is_backbone: false,
+            is_hetero: true,
+        };
+        assert_eq!(ColorScheme::element_color(&atom), Color::Rgb(0, 180, 0));
     }
 }

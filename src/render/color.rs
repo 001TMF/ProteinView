@@ -13,17 +13,26 @@ pub enum ColorSchemeType {
     BFactor,
     Rainbow,
     Interface,
+    Plddt,
 }
 
 impl ColorSchemeType {
-    pub fn next(&self) -> Self {
+    pub fn next(&self, has_plddt: bool) -> Self {
         match self {
-            Self::Structure => Self::Chain,
-            Self::Chain => Self::Element,
-            Self::Element => Self::BFactor,
-            Self::BFactor => Self::Rainbow,
+            Self::Structure => Self::Element,
+            Self::Element => Self::Chain,
+            Self::Chain => {
+                if has_plddt {
+                    Self::Plddt
+                } else {
+                    Self::Structure
+                }
+            }
+            Self::Plddt => Self::Structure,
+            // BFactor and Rainbow are accessible via --color CLI flag
+            Self::BFactor => Self::Structure,
             Self::Rainbow => Self::Structure,
-            // Interface is toggled separately, skip it in the cycle
+            // Interface is toggled separately via 'f' key
             Self::Interface => Self::Structure,
         }
     }
@@ -36,6 +45,7 @@ impl ColorSchemeType {
             Self::BFactor => "B-Factor",
             Self::Rainbow => "Rainbow",
             Self::Interface => "Interface",
+            Self::Plddt => "pLDDT",
         }
     }
 }
@@ -87,6 +97,7 @@ impl ColorScheme {
             ColorSchemeType::BFactor => self.bfactor_color(residue),
             ColorSchemeType::Rainbow => self.rainbow_color(residue),
             ColorSchemeType::Interface => self.interface_color(residue, chain),
+            ColorSchemeType::Plddt => self.plddt_residue_color(residue),
         }
     }
 
@@ -177,6 +188,11 @@ impl ColorScheme {
             },
             ColorSchemeType::Rainbow => Color::Rgb(255, 0, 255),
             ColorSchemeType::Interface => Color::Rgb(255, 255, 255), // bright white to stand out
+            // pLDDT mode: fall back to Structure-mode colors for ligands
+            ColorSchemeType::Plddt => match ligand.ligand_type {
+                LigandType::Ligand => Color::Rgb(255, 0, 255),   // magenta for ligands
+                LigandType::Ion => Color::Rgb(0, 255, 255),      // cyan for ions
+            },
         }
     }
 
@@ -184,6 +200,8 @@ impl ColorScheme {
     pub fn ligand_atom_color(&self, atom: &Atom, ligand: &Ligand) -> Color {
         match self.scheme_type {
             ColorSchemeType::Element => Self::element_color(atom),
+            // pLDDT mode: fall back to Element-mode (CPK) colors for ligand atoms
+            ColorSchemeType::Plddt => Self::element_color(atom),
             _ => self.ligand_color(ligand),
         }
     }
@@ -235,6 +253,35 @@ impl ColorScheme {
         let hue = (1.0 - t) * 300.0;
         let (r, g, b) = hsv_to_rgb(hue, 1.0, 1.0);
         Color::Rgb(r, g, b)
+    }
+
+    /// AlphaFold pLDDT confidence color for a raw B-factor value.
+    ///
+    /// Uses the standard AlphaFold color bands:
+    /// - >= 90: dark blue  (very high confidence)
+    /// - >= 70: light blue (confident)
+    /// - >= 50: yellow     (low confidence)
+    /// - <  50: orange     (very low confidence)
+    pub fn plddt_color(b_factor: f64) -> Color {
+        if b_factor >= 90.0 {
+            Color::Rgb(0, 83, 214)
+        } else if b_factor >= 70.0 {
+            Color::Rgb(101, 203, 243)
+        } else if b_factor >= 50.0 {
+            Color::Rgb(255, 219, 19)
+        } else {
+            Color::Rgb(255, 125, 69)
+        }
+    }
+
+    /// pLDDT color for a residue, using the average B-factor of its atoms.
+    fn plddt_residue_color(&self, residue: &Residue) -> Color {
+        let avg_b = if residue.atoms.is_empty() {
+            0.0
+        } else {
+            residue.atoms.iter().map(|a| a.b_factor).sum::<f64>() / residue.atoms.len() as f64
+        };
+        Self::plddt_color(avg_b)
     }
 }
 
@@ -500,5 +547,84 @@ mod tests {
             is_hetero: true,
         };
         assert_eq!(ColorScheme::element_color(&atom), Color::Rgb(0, 180, 0));
+    }
+
+    // ---- pLDDT coloring ----
+
+    #[test]
+    fn test_plddt_color_bands() {
+        // Very high confidence (>= 90): dark blue
+        assert_eq!(ColorScheme::plddt_color(90.0), Color::Rgb(0, 83, 214));
+        assert_eq!(ColorScheme::plddt_color(95.0), Color::Rgb(0, 83, 214));
+        assert_eq!(ColorScheme::plddt_color(100.0), Color::Rgb(0, 83, 214));
+
+        // Confident (>= 70, < 90): light blue
+        assert_eq!(ColorScheme::plddt_color(70.0), Color::Rgb(101, 203, 243));
+        assert_eq!(ColorScheme::plddt_color(80.0), Color::Rgb(101, 203, 243));
+        assert_eq!(ColorScheme::plddt_color(89.9), Color::Rgb(101, 203, 243));
+
+        // Low confidence (>= 50, < 70): yellow
+        assert_eq!(ColorScheme::plddt_color(50.0), Color::Rgb(255, 219, 19));
+        assert_eq!(ColorScheme::plddt_color(60.0), Color::Rgb(255, 219, 19));
+        assert_eq!(ColorScheme::plddt_color(69.9), Color::Rgb(255, 219, 19));
+
+        // Very low confidence (< 50): orange
+        assert_eq!(ColorScheme::plddt_color(49.9), Color::Rgb(255, 125, 69));
+        assert_eq!(ColorScheme::plddt_color(30.0), Color::Rgb(255, 125, 69));
+        assert_eq!(ColorScheme::plddt_color(0.0), Color::Rgb(255, 125, 69));
+    }
+
+    #[test]
+    fn test_plddt_next_cycling() {
+        // With pLDDT available: Structure -> Element -> Chain -> Plddt -> Structure
+        assert_eq!(ColorSchemeType::Structure.next(true), ColorSchemeType::Element);
+        assert_eq!(ColorSchemeType::Element.next(true), ColorSchemeType::Chain);
+        assert_eq!(ColorSchemeType::Chain.next(true), ColorSchemeType::Plddt);
+        assert_eq!(ColorSchemeType::Plddt.next(true), ColorSchemeType::Structure);
+
+        // Without pLDDT: Structure -> Element -> Chain -> Structure (skips Plddt)
+        assert_eq!(ColorSchemeType::Structure.next(false), ColorSchemeType::Element);
+        assert_eq!(ColorSchemeType::Element.next(false), ColorSchemeType::Chain);
+        assert_eq!(ColorSchemeType::Chain.next(false), ColorSchemeType::Structure);
+
+        // Interface always cycles to Structure regardless of pLDDT flag
+        assert_eq!(ColorSchemeType::Interface.next(true), ColorSchemeType::Structure);
+        assert_eq!(ColorSchemeType::Interface.next(false), ColorSchemeType::Structure);
+    }
+
+    #[test]
+    fn test_plddt_ligand_fallback() {
+        let scheme = ColorScheme::new(ColorSchemeType::Plddt, 100);
+
+        // Ligands should fall back to Structure-mode colors (magenta)
+        let ligand = crate::model::protein::Ligand {
+            name: "HEM".to_string(),
+            chain_id: "A".to_string(),
+            seq_num: 1,
+            atoms: vec![],
+            ligand_type: LigandType::Ligand,
+        };
+        assert_eq!(scheme.ligand_color(&ligand), Color::Rgb(255, 0, 255));
+
+        // Ions should fall back to Structure-mode colors (cyan)
+        let ion = crate::model::protein::Ligand {
+            name: "ZN".to_string(),
+            chain_id: "A".to_string(),
+            seq_num: 1,
+            atoms: vec![],
+            ligand_type: LigandType::Ion,
+        };
+        assert_eq!(scheme.ligand_color(&ion), Color::Rgb(0, 255, 255));
+
+        // Ligand atoms should fall back to Element-mode (CPK) colors
+        let fe_atom = Atom {
+            name: "FE".to_string(),
+            element: "Fe".to_string(),
+            x: 0.0, y: 0.0, z: 0.0,
+            b_factor: 0.0,
+            is_backbone: false,
+            is_hetero: true,
+        };
+        assert_eq!(scheme.ligand_atom_color(&fe_atom, &ligand), Color::Rgb(224, 102, 51));
     }
 }

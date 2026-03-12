@@ -41,7 +41,7 @@ struct Cli {
     #[arg(long, alias = "pixel")]
     hd: bool,
 
-    /// Color scheme: structure, chain, element, bfactor, rainbow
+    /// Color scheme: structure, element, chain, plddt, bfactor, rainbow
     #[arg(long, default_value = "structure")]
     color: String,
 
@@ -117,8 +117,22 @@ fn main() -> Result<()> {
     log!(logfile, "picker: protocol={:?} font_size={:?}",
         picker.protocol_type(), picker.font_size());
 
+    // Parse CLI color scheme override
+    let color_override = match cli.color.to_ascii_lowercase().as_str() {
+        "structure" => None, // default, no override needed
+        "element" => Some(render::color::ColorSchemeType::Element),
+        "chain" => Some(render::color::ColorSchemeType::Chain),
+        "bfactor" | "b-factor" => Some(render::color::ColorSchemeType::BFactor),
+        "rainbow" => Some(render::color::ColorSchemeType::Rainbow),
+        "plddt" => Some(render::color::ColorSchemeType::Plddt),
+        _ => {
+            eprintln!("Warning: unknown color scheme '{}', using structure", cli.color);
+            None
+        }
+    };
+
     // Create app with actual terminal dimensions for dynamic zoom
-    let mut app = App::new(protein, cli.hd, term_cols, term_rows, picker);
+    let mut app = App::new(protein, cli.hd, term_cols, term_rows, picker, color_override);
     log!(logfile, "app created: hd={} chains={} zoom={:.2}", app.hd_mode, app.protein.chains.len(), app.camera.zoom);
 
     // Spawn dedicated input thread — decouples input from rendering so

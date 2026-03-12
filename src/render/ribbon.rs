@@ -99,6 +99,124 @@ fn v3_normalize(a: V3) -> V3 {
 }
 
 // ---------------------------------------------------------------------------
+// Sheet frame guide helpers
+// ---------------------------------------------------------------------------
+
+use crate::model::protein::Residue;
+
+/// Compute the carbonyl C→O direction for a protein residue.
+///
+/// Looks for backbone atoms named "C" (carbonyl carbon) and "O" (carbonyl
+/// oxygen), computes the normalized direction vector from C to O.  As a
+/// fallback, tries CA→O if C is missing.  Returns `None` for nucleic acid
+/// residues or when the required atoms are absent.
+fn residue_frame_hint(residue: &Residue) -> Option<V3> {
+    let find_atom = |name: &str| -> Option<V3> {
+        residue
+            .atoms
+            .iter()
+            .find(|a| a.name.trim() == name)
+            .map(|a| [a.x, a.y, a.z])
+    };
+
+    let o_pos = find_atom("O")?;
+
+    // Prefer backbone C atom; fall back to CA.
+    let origin = find_atom("C").or_else(|| find_atom("CA"))?;
+
+    let dir = v3_sub(o_pos, origin);
+    let len = v3_len(dir);
+    if len < 1e-12 {
+        return None;
+    }
+    Some(v3_scale(dir, 1.0 / len))
+}
+
+/// Project vector `v` perpendicular to `onto` and normalize the result.
+/// Returns `None` if the projection is degenerate (v is parallel to onto).
+fn project_perp_normalize(v: V3, onto: V3) -> Option<V3> {
+    let d = v3_dot(v, onto);
+    let perp = v3_sub(v, v3_scale(onto, d));
+    let len = v3_len(perp);
+    if len < 1e-12 {
+        None
+    } else {
+        Some(v3_scale(perp, 1.0 / len))
+    }
+}
+
+/// Adjust binormal/normal frames for sheet regions using carbonyl direction
+/// hints (frame guides).
+///
+/// This runs **after** parallel-transport frame computation.  For each
+/// contiguous run of `SecondaryStructure::Sheet` spline points, it:
+///   1. Projects each point's `frame_hint` perpendicular to the tangent.
+///   2. Aligns consecutive projected hints to the same hemisphere.
+///   3. Blends the hint with the existing binormal (65% hint / 35% existing).
+///   4. Recomputes the normal from `tangent × blended_binormal`.
+///
+/// Points outside sheet regions or without hints are left unchanged.
+fn apply_sheet_frame_guides(spline_points: &mut [SplinePoint]) {
+    let n = spline_points.len();
+    if n == 0 {
+        return;
+    }
+
+    // Identify contiguous sheet runs.
+    let mut i = 0;
+    while i < n {
+        if spline_points[i].ss != SecondaryStructure::Sheet {
+            i += 1;
+            continue;
+        }
+
+        // Found the start of a sheet run.
+        let run_start = i;
+        while i < n && spline_points[i].ss == SecondaryStructure::Sheet {
+            i += 1;
+        }
+        let run_end = i; // exclusive
+
+        // Process this sheet run: project hints, align signs, blend.
+        let mut prev_hint_perp: Option<V3> = None;
+
+        for sp in spline_points[run_start..run_end].iter_mut() {
+            let hint = match sp.frame_hint {
+                Some(h) => h,
+                None => continue,
+            };
+
+            let tangent = sp.tangent;
+
+            // Project hint perpendicular to tangent.
+            let mut hint_perp = match project_perp_normalize(hint, tangent) {
+                Some(h) => h,
+                None => continue,
+            };
+
+            // Align sign with previous hint to avoid flipping.
+            if let Some(prev) = prev_hint_perp {
+                if v3_dot(hint_perp, prev) < 0.0 {
+                    hint_perp = v3_scale(hint_perp, -1.0);
+                }
+            }
+            prev_hint_perp = Some(hint_perp);
+
+            // Blend with existing binormal: 65% hint, 35% existing.
+            let existing_b = sp.binormal;
+            let blended = v3_add(v3_scale(hint_perp, 0.65), v3_scale(existing_b, 0.35));
+            let new_binormal = v3_normalize(blended);
+
+            // Recompute normal from tangent x binormal.
+            let new_normal = v3_normalize(v3_cross(tangent, new_binormal));
+
+            sp.binormal = new_binormal;
+            sp.normal = new_normal;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Catmull-Rom spline
 // ---------------------------------------------------------------------------
 
@@ -131,6 +249,9 @@ struct SplinePoint {
     tangent: V3,
     normal: V3,
     binormal: V3,
+    /// Carbonyl direction hint propagated from the nearest control point.
+    /// Used by `apply_sheet_frame_guides` to orient sheet ribbons.
+    frame_hint: Option<V3>,
     ss: SecondaryStructure,
     color: [u8; 3],
     /// True when this point lies within the arrowhead region at the end of a
@@ -354,6 +475,8 @@ struct CaRecord {
     pos: V3,
     ss: SecondaryStructure,
     color: [u8; 3],
+    /// Carbonyl C→O direction hint for sheet frame orientation.
+    frame_hint: Option<V3>,
 }
 
 // ---------------------------------------------------------------------------
@@ -412,6 +535,11 @@ fn build_spline_tube(records: &[CaRecord], out: &mut Vec<RibbonTriangle>) {
                 tangent: [0.0, 0.0, 0.0],
                 normal: [0.0, 1.0, 0.0],
                 binormal: [0.0, 0.0, 1.0],
+                frame_hint: if t < 0.5 {
+                    records[i1].frame_hint
+                } else {
+                    records[i2].frame_hint
+                },
                 ss,
                 color,
                 arrow_t: None,
@@ -464,6 +592,9 @@ fn build_spline_tube(records: &[CaRecord], out: &mut Vec<RibbonTriangle>) {
         }
     }
 
+    // --- Step 3b: Apply sheet frame guides ---
+    apply_sheet_frame_guides(&mut spline_points);
+
     // --- Step 4: Build cross-sections and emit triangle strips ---
     let mut prev_ring = cross_section(&spline_points[0]);
 
@@ -510,7 +641,7 @@ fn generate_chain_ribbon(
     color_scheme: &ColorScheme,
     out: &mut Vec<RibbonTriangle>,
 ) {
-    // 1. Collect C-alpha positions, SS types, and colors.
+    // 1. Collect C-alpha positions, SS types, colors, and frame hints.
     let cas: Vec<CaRecord> = chain
         .residues
         .iter()
@@ -521,6 +652,7 @@ fn generate_chain_ribbon(
                 pos: [ca.x, ca.y, ca.z],
                 ss: res.secondary_structure,
                 color,
+                frame_hint: residue_frame_hint(res),
             })
         })
         .collect();
@@ -617,11 +749,19 @@ fn generate_chain_ribbon(
                 }
             });
 
+            // Nearest-neighbor frame hint: snap to the closer control point.
+            let frame_hint = if t < 0.5 {
+                cas[i1].frame_hint
+            } else {
+                cas[i2].frame_hint
+            };
+
             spline_points.push(SplinePoint {
                 pos,
                 tangent: [0.0, 0.0, 0.0], // computed below
                 normal: [0.0, 1.0, 0.0],
                 binormal: [0.0, 0.0, 1.0],
+                frame_hint,
                 ss,
                 color,
                 arrow_t,
@@ -682,6 +822,9 @@ fn generate_chain_ribbon(
             prev_normal = n;
         }
     }
+
+    // 5b. Apply sheet frame guides (carbonyl-direction-based orientation).
+    apply_sheet_frame_guides(&mut spline_points);
 
     // 6. Build cross-sections and emit triangle strips.
     let mut prev_ring = cross_section(&spline_points[0]);
@@ -761,6 +904,7 @@ fn generate_nucleic_acid_ribbon(
                 pos: [c4.x, c4.y, c4.z],
                 ss: SecondaryStructure::Coil, // always coil for nucleic acids
                 color,
+                frame_hint: None, // not applicable for nucleic acids
             })
         })
         .collect();
@@ -885,4 +1029,191 @@ fn emit_quad(
         color,
         normal: n2,
     });
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::protein::{Atom, Residue};
+
+    /// Helper to build a minimal atom.
+    fn make_atom(name: &str, x: f64, y: f64, z: f64) -> Atom {
+        Atom {
+            name: name.to_string(),
+            element: "C".to_string(),
+            x,
+            y,
+            z,
+            b_factor: 0.0,
+            is_backbone: name == "CA",
+            is_hetero: false,
+        }
+    }
+
+    #[test]
+    fn test_residue_frame_hint_with_co() {
+        // Residue with C at origin and O along the +X axis.
+        let res = Residue {
+            name: "ALA".to_string(),
+            seq_num: 1,
+            atoms: vec![
+                make_atom("CA", 0.0, 0.0, 0.0),
+                make_atom("C", 1.0, 0.0, 0.0),
+                make_atom("O", 4.0, 0.0, 0.0),
+            ],
+            secondary_structure: SecondaryStructure::Sheet,
+        };
+        let hint = residue_frame_hint(&res).expect("should produce a hint");
+        // Direction should be [1, 0, 0] (normalized C→O).
+        assert!((hint[0] - 1.0).abs() < 1e-9);
+        assert!(hint[1].abs() < 1e-9);
+        assert!(hint[2].abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_residue_frame_hint_missing_o() {
+        // Residue with C but no O.
+        let res = Residue {
+            name: "ALA".to_string(),
+            seq_num: 1,
+            atoms: vec![
+                make_atom("CA", 0.0, 0.0, 0.0),
+                make_atom("C", 1.0, 0.0, 0.0),
+                make_atom("N", 2.0, 0.0, 0.0),
+            ],
+            secondary_structure: SecondaryStructure::Sheet,
+        };
+        assert!(residue_frame_hint(&res).is_none());
+    }
+
+    #[test]
+    fn test_residue_frame_hint_fallback_ca_o() {
+        // Residue with CA and O but no C — should use CA→O fallback.
+        let res = Residue {
+            name: "ALA".to_string(),
+            seq_num: 1,
+            atoms: vec![
+                make_atom("CA", 0.0, 0.0, 0.0),
+                make_atom("O", 0.0, 3.0, 0.0),
+            ],
+            secondary_structure: SecondaryStructure::Sheet,
+        };
+        let hint = residue_frame_hint(&res).expect("should fallback to CA->O");
+        assert!(hint[0].abs() < 1e-9);
+        assert!((hint[1] - 1.0).abs() < 1e-9);
+        assert!(hint[2].abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_apply_sheet_guides_flipped_hints() {
+        // Build a small set of sheet spline points with alternating hint signs.
+        // After apply_sheet_frame_guides, consecutive binormals should be
+        // coherent (positive dot product).
+        let mut points: Vec<SplinePoint> = Vec::new();
+        for i in 0..6 {
+            let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+            points.push(SplinePoint {
+                pos: [i as f64, 0.0, 0.0],
+                tangent: [1.0, 0.0, 0.0],
+                normal: [0.0, 1.0, 0.0],
+                binormal: [0.0, 0.0, 1.0],
+                frame_hint: Some([0.0, sign * 0.5, 0.5]),
+                ss: SecondaryStructure::Sheet,
+                color: [255, 255, 255],
+                arrow_t: None,
+            });
+        }
+
+        apply_sheet_frame_guides(&mut points);
+
+        // All consecutive binormals should agree in direction.
+        for i in 1..points.len() {
+            let d = v3_dot(points[i].binormal, points[i - 1].binormal);
+            assert!(
+                d > 0.0,
+                "Binormals at {} and {} should agree in sign, got dot={}",
+                i - 1,
+                i,
+                d
+            );
+        }
+    }
+
+    #[test]
+    fn test_coil_points_unaffected() {
+        // Build spline points that are all Coil with frame hints.
+        // They should NOT be modified by the guide pass.
+        let original_binormal: V3 = [0.0, 0.0, 1.0];
+        let original_normal: V3 = [0.0, 1.0, 0.0];
+
+        let mut points: Vec<SplinePoint> = Vec::new();
+        for i in 0..4 {
+            points.push(SplinePoint {
+                pos: [i as f64, 0.0, 0.0],
+                tangent: [1.0, 0.0, 0.0],
+                normal: original_normal,
+                binormal: original_binormal,
+                frame_hint: Some([0.0, 0.7, 0.7]),
+                ss: SecondaryStructure::Coil,
+                color: [128, 128, 128],
+                arrow_t: None,
+            });
+        }
+
+        apply_sheet_frame_guides(&mut points);
+
+        for (i, sp) in points.iter().enumerate() {
+            assert_eq!(
+                sp.binormal, original_binormal,
+                "Coil point {} binormal should be unchanged",
+                i
+            );
+            assert_eq!(
+                sp.normal, original_normal,
+                "Coil point {} normal should be unchanged",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_helix_points_unaffected() {
+        // Build spline points that are all Helix with frame hints.
+        // They should NOT be modified by the guide pass.
+        let original_binormal: V3 = [0.0, 0.0, 1.0];
+        let original_normal: V3 = [0.0, 1.0, 0.0];
+
+        let mut points: Vec<SplinePoint> = Vec::new();
+        for i in 0..4 {
+            points.push(SplinePoint {
+                pos: [i as f64, 0.0, 0.0],
+                tangent: [1.0, 0.0, 0.0],
+                normal: original_normal,
+                binormal: original_binormal,
+                frame_hint: Some([0.0, 0.7, 0.7]),
+                ss: SecondaryStructure::Helix,
+                color: [128, 128, 128],
+                arrow_t: None,
+            });
+        }
+
+        apply_sheet_frame_guides(&mut points);
+
+        for (i, sp) in points.iter().enumerate() {
+            assert_eq!(
+                sp.binormal, original_binormal,
+                "Helix point {} binormal should be unchanged",
+                i
+            );
+            assert_eq!(
+                sp.normal, original_normal,
+                "Helix point {} normal should be unchanged",
+                i
+            );
+        }
+    }
 }

@@ -5,12 +5,16 @@ use crate::model::secondary::{assign_from_pdb_file, assign_from_cif_file};
 /// Load a protein structure from a PDB or mmCIF file
 pub fn load_structure(path: &str) -> Result<Protein> {
     // Try default strictness first, fall back to loose + atomic-coords-only
-    // for files like AlphaFold3 output that have non-standard metadata
-    let (pdb, _errors) = pdbtbx::open(path)
+    // for files like AlphaFold3 output that have non-standard metadata.
+    // Both paths use only_first_model to avoid NMR multi-model duplication.
+    let (pdb, _errors) = pdbtbx::ReadOptions::new()
+        .set_only_first_model(true)
+        .read(path)
         .or_else(|_| {
             pdbtbx::ReadOptions::new()
                 .set_level(pdbtbx::StrictnessLevel::Loose)
                 .set_only_atomic_coords(true)
+                .set_only_first_model(true)
                 .read(path)
         })
         .map_err(|e| anyhow::anyhow!("Failed to open structure file: {:?}", e))?;
@@ -273,5 +277,65 @@ mod tests {
             },
         ];
         assert_eq!(classify_chain_type(&residues), MoleculeType::DNA);
+    }
+
+    #[test]
+    fn test_nmr_multimodel_loads_single_model() {
+        // 2KGP is an NMR RNA structure with 10 MODEL records.
+        // The parser should only load the first model, not duplicate
+        // chains/atoms across all 10 models.
+        let protein = load_structure("examples/2KGP.pdb")
+            .expect("Failed to load 2KGP.pdb");
+
+        // Should have exactly 1 chain (not 10 duplicated chains)
+        assert_eq!(
+            protein.chains.len(),
+            1,
+            "NMR multi-model file should produce 1 chain, got {}",
+            protein.chains.len()
+        );
+
+        // The single chain should be classified as RNA
+        assert_eq!(protein.chains[0].molecule_type, MoleculeType::RNA);
+
+        // Atom count should be reasonable for a single model (~500-900),
+        // not inflated by 10x from all models (~8590)
+        let total_atoms: usize = protein.chains[0]
+            .residues
+            .iter()
+            .map(|r| r.atoms.len())
+            .sum();
+        assert!(
+            total_atoms < 1000,
+            "Expected < 1000 atoms for single NMR model, got {} (multi-model duplication?)",
+            total_atoms
+        );
+    }
+
+    #[test]
+    fn test_single_model_pdb_unaffected() {
+        // 1UBQ is a single-model X-ray protein structure (ubiquitin).
+        // Verify it still loads correctly after NMR multi-model handling.
+        let protein = load_structure("examples/1UBQ.pdb")
+            .expect("Failed to load 1UBQ.pdb");
+
+        // Ubiquitin has 1 chain (chain A)
+        assert_eq!(
+            protein.chains.len(),
+            1,
+            "1UBQ should have 1 chain, got {}",
+            protein.chains.len()
+        );
+
+        // It should be classified as a protein
+        assert_eq!(protein.chains[0].molecule_type, MoleculeType::Protein);
+
+        // Ubiquitin has 76 amino acid residues plus ~58 crystallographic
+        // water molecules (HOH) parsed as HETATM, totalling ~134 residues.
+        assert!(
+            protein.chains[0].residues.len() >= 70 && protein.chains[0].residues.len() <= 150,
+            "Expected ~134 residues for ubiquitin (76 AA + waters), got {}",
+            protein.chains[0].residues.len()
+        );
     }
 }

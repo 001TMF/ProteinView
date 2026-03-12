@@ -45,6 +45,8 @@ pub struct App {
     pub show_interface: bool,
     pub interface_analysis: InterfaceAnalysis,
     pub should_quit: bool,
+    /// Whether the B-factor column likely contains pLDDT confidence scores.
+    pub has_plddt: bool,
     /// Cached ribbon mesh — regenerated only when color scheme changes.
     pub mesh_cache: Vec<RibbonTriangle>,
     mesh_dirty: bool,
@@ -53,8 +55,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(mut protein: Protein, hd_mode: bool, term_cols: u16, term_rows: u16, picker: Picker) -> Self {
+    pub fn new(mut protein: Protein, hd_mode: bool, term_cols: u16, term_rows: u16, picker: Picker, color_override: Option<ColorSchemeType>) -> Self {
         protein.center();
+        // If user explicitly requested pLDDT via CLI, trust that even if
+        // the heuristic disagrees.
+        let has_plddt = protein.has_plddt()
+            || color_override == Some(ColorSchemeType::Plddt);
         let total_residues = protein.residue_count();
         let radius = protein.bounding_radius().max(1.0);
         // Dynamic zoom based on actual terminal size.
@@ -92,7 +98,8 @@ impl App {
             ia
         };
 
-        let color_scheme = ColorScheme::new(ColorSchemeType::Structure, total_residues);
+        let initial_scheme = color_override.unwrap_or(ColorSchemeType::Structure);
+        let color_scheme = ColorScheme::new(initial_scheme, total_residues);
         let mesh_cache = generate_ribbon_mesh(&protein, &color_scheme);
 
         Self {
@@ -107,6 +114,7 @@ impl App {
             show_interface: false,
             interface_analysis,
             should_quit: false,
+            has_plddt,
             mesh_cache,
             mesh_dirty: false,
             picker,
@@ -114,7 +122,7 @@ impl App {
     }
 
     pub fn cycle_color(&mut self) {
-        let next = self.color_scheme.scheme_type.next();
+        let next = self.color_scheme.scheme_type.next(self.has_plddt);
         self.color_scheme = ColorScheme::new(next, self.protein.residue_count());
         self.mesh_dirty = true;
     }

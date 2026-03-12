@@ -160,7 +160,22 @@ impl ColorScheme {
                 let b = ((1.0 - t) * 255.0) as u8;
                 Color::Rgb(r, 0, b)
             },
-            ColorSchemeType::Chain | ColorSchemeType::Rainbow => Color::Rgb(255, 0, 255),
+            ColorSchemeType::Chain => {
+                // Match parent chain's color using chain_id
+                let chain_colors = [
+                    Color::Rgb(0, 180, 255),
+                    Color::Rgb(255, 100, 0),
+                    Color::Rgb(0, 220, 100),
+                    Color::Rgb(255, 50, 150),
+                    Color::Rgb(180, 100, 255),
+                    Color::Rgb(255, 220, 0),
+                    Color::Rgb(0, 200, 200),
+                    Color::Rgb(255, 150, 150),
+                ];
+                let idx = ligand.chain_id.bytes().next().unwrap_or(b'A') as usize % chain_colors.len();
+                chain_colors[idx]
+            },
+            ColorSchemeType::Rainbow => Color::Rgb(255, 0, 255),
             ColorSchemeType::Interface => Color::Rgb(255, 255, 255), // bright white to stand out
         }
     }

@@ -10,6 +10,7 @@ use crate::render::ribbon::RibbonTriangle;
 /// This is the core rasterization entry-point.  Callers decide how to present
 /// the result -- either via braille characters or via a graphics-protocol
 /// image (Sixel / Kitty) through ratatui-image.
+#[allow(clippy::too_many_arguments)]
 pub fn render_hd_framebuffer(
     protein: &Protein,
     camera: &Camera,

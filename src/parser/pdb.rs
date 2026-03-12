@@ -391,6 +391,30 @@ mod tests {
     }
 
     #[test]
+    fn test_4hhb_ligand_parsing() {
+        // 4HHB is hemoglobin with 4 HEM (heme) ligands and ions
+        let protein = load_structure("examples/4HHB.pdb")
+            .expect("Failed to load 4HHB.pdb");
+
+        // Should have 4 protein chains
+        assert_eq!(protein.chains.len(), 4);
+
+        // Should have ligands (HEM groups and possibly PO4/ions)
+        assert!(protein.ligand_count() > 0, "4HHB should have ligands");
+
+        // At least the 4 HEM groups should be present
+        let hem_count = protein.ligands.iter()
+            .filter(|l| l.name == "HEM")
+            .count();
+        assert!(hem_count >= 4, "Expected at least 4 HEM ligands, got {}", hem_count);
+
+        // HEM should be classified as Ligand (not Ion) since it's multi-atom
+        for l in protein.ligands.iter().filter(|l| l.name == "HEM") {
+            assert_eq!(l.ligand_type, LigandType::Ligand, "HEM should be Ligand type");
+        }
+    }
+
+    #[test]
     fn test_ion_classification() {
         // Verify COMMON_IONS contains expected ions
         assert!(COMMON_IONS.contains(&"ZN"), "ZN should be a common ion");

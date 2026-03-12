@@ -598,9 +598,9 @@ fn build_spline_tube(records: &[CaRecord], out: &mut Vec<RibbonTriangle>) {
     // --- Step 4: Build cross-sections and emit triangle strips ---
     let mut prev_ring = cross_section(&spline_points[0]);
 
-    for i in 1..spline_points.len() {
-        let mut curr_ring = cross_section(&spline_points[i]);
-        let color = spline_points[i].color;
+    for sp in spline_points.iter().skip(1) {
+        let mut curr_ring = cross_section(sp);
+        let color = sp.color;
 
         if prev_ring.len() != curr_ring.len() {
             let target = prev_ring.len().max(curr_ring.len());
@@ -741,8 +741,8 @@ fn generate_chain_ribbon(
                 let arrow_end = aend as f64; // exclusive in residue space but we approach it
                 // We actually want the arrow to span [astart, aend-1] in segment indices,
                 // so the last spline sample is at aend.
-                if global_pos >= arrow_begin && global_pos <= arrow_end as f64 {
-                    let frac = (global_pos - arrow_begin) / (arrow_end as f64 - arrow_begin);
+                if global_pos >= arrow_begin && global_pos <= arrow_end {
+                    let frac = (global_pos - arrow_begin) / (arrow_end - arrow_begin);
                     Some(frac.clamp(0.0, 1.0))
                 } else {
                     None
@@ -829,9 +829,9 @@ fn generate_chain_ribbon(
     // 6. Build cross-sections and emit triangle strips.
     let mut prev_ring = cross_section(&spline_points[0]);
 
-    for i in 1..spline_points.len() {
-        let mut curr_ring = cross_section(&spline_points[i]);
-        let color = spline_points[i].color;
+    for sp in spline_points.iter().skip(1) {
+        let mut curr_ring = cross_section(sp);
+        let color = sp.color;
 
         // Handle cross-section vertex count mismatch at SS transitions.
         if prev_ring.len() != curr_ring.len() {

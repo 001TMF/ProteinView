@@ -61,7 +61,7 @@ fn parse_ss_records(file_path: &str) -> Vec<SSRange> {
                 ranges.push(SSRange {
                     chain_id: init_chain.to_string(),
                     start_seq: init_seq,
-                    end_seq: end_seq,
+                    end_seq,
                     ss_type: SecondaryStructure::Helix,
                 });
             }
@@ -91,7 +91,7 @@ fn parse_ss_records(file_path: &str) -> Vec<SSRange> {
                 ranges.push(SSRange {
                     chain_id: init_chain.to_string(),
                     start_seq: init_seq,
-                    end_seq: end_seq,
+                    end_seq,
                     ss_type: SecondaryStructure::Sheet,
                 });
             }
@@ -202,7 +202,7 @@ fn parse_cif_ss_records(file_path: &str) -> Vec<SSRange> {
     let mut column_names: Vec<String> = Vec::new();
     let mut col_map: HashMap<String, usize> = HashMap::new();
 
-    let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
+    let lines: Vec<String> = reader.lines().map_while(|l| l.ok()).collect();
     let mut i = 0;
 
     while i < lines.len() {

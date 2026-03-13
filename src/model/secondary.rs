@@ -22,7 +22,10 @@ pub struct SSRange {
 fn parse_ss_records(file_path: &str) -> Vec<SSRange> {
     let file = match File::open(file_path) {
         Ok(f) => f,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            eprintln!("Warning: could not re-open '{}' for SS records: {}", file_path, e);
+            return Vec::new();
+        }
     };
     let reader = BufReader::new(file);
     let mut ranges = Vec::new();
@@ -30,7 +33,10 @@ fn parse_ss_records(file_path: &str) -> Vec<SSRange> {
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
-            Err(_) => continue,
+            Err(e) => {
+                eprintln!("Warning: skipping unreadable line in '{}': {}", file_path, e);
+                continue;
+            }
         };
 
         if line.starts_with("HELIX ") {
@@ -182,7 +188,10 @@ fn tokenize_cif_line(line: &str) -> Vec<String> {
 fn parse_cif_ss_records(file_path: &str) -> Vec<SSRange> {
     let file = match File::open(file_path) {
         Ok(f) => f,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            eprintln!("Warning: could not re-open '{}' for CIF SS records: {}", file_path, e);
+            return Vec::new();
+        }
     };
     let reader = BufReader::new(file);
     let mut ranges = Vec::new();
@@ -202,7 +211,8 @@ fn parse_cif_ss_records(file_path: &str) -> Vec<SSRange> {
     let mut column_names: Vec<String> = Vec::new();
     let mut col_map: HashMap<String, usize> = HashMap::new();
 
-    let lines: Vec<String> = reader.lines().map_while(|l| l.ok()).collect();
+    #[allow(clippy::lines_filter_map_ok)]
+    let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
     let mut i = 0;
 
     while i < lines.len() {
@@ -461,8 +471,12 @@ fn compute_torsion_angles(residues: &[Residue]) -> Vec<Option<(f64, f64)>> {
             continue;
         };
 
-        let phi = dihedral(c_prev, n_i, ca_i, c_i);
-        let psi = dihedral(n_i, ca_i, c_i, n_next);
+        let (Some(phi), Some(psi)) = (
+            dihedral(c_prev, n_i, ca_i, c_i),
+            dihedral(n_i, ca_i, c_i, n_next),
+        ) else {
+            continue; // degenerate geometry — skip this residue
+        };
         torsions[i] = Some((phi, psi));
     }
 
@@ -790,28 +804,23 @@ fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {
 }
 
 /// Compute the dihedral angle (in degrees) defined by four points.
-fn dihedral(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3]) -> f64 {
+/// Returns None for degenerate geometry (coincident atoms, collinear atoms).
+fn dihedral(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3]) -> Option<f64> {
     // IUPAC/biochemistry convention (matches MDAnalysis/BioPython):
     // Bond vectors along the chain A→B→C→D
     let b1 = sub(b, a);
     let b2 = sub(c, b);
     let b3 = sub(d, c);
 
-    let Some(b2_unit) = normalize(b2) else {
-        return 0.0;
-    };
+    let b2_unit = normalize(b2)?;
 
     let n1 = cross(b1, b2); // normal to plane A-B-C
     let n2 = cross(b2, b3); // normal to plane B-C-D
-    let Some(n1_unit) = normalize(n1) else {
-        return 0.0;
-    };
-    let Some(n2_unit) = normalize(n2) else {
-        return 0.0;
-    };
+    let n1_unit = normalize(n1)?;
+    let n2_unit = normalize(n2)?;
 
     let m1 = cross(n1_unit, b2_unit);
-    -dot(m1, n2_unit).atan2(dot(n1_unit, n2_unit)).to_degrees()
+    Some(-dot(m1, n2_unit).atan2(dot(n1_unit, n2_unit)).to_degrees())
 }
 
 #[cfg(test)]
@@ -999,7 +1008,7 @@ mod tests {
         // Trans (±180°): D projects to -X (opposite side from A)
         let trans = dihedral(
             [1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-1.0, 1.0, 0.0],
-        );
+        ).unwrap();
         assert!(
             (trans.abs() - 180.0).abs() < 1.0,
             "Expected ~±180° for trans, got {trans}"
@@ -1008,7 +1017,7 @@ mod tests {
         // Cis (0°): D projects to +X (same side as A)
         let cis = dihedral(
             [1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0],
-        );
+        ).unwrap();
         assert!(
             cis.abs() < 1.0,
             "Expected ~0° for cis, got {cis}"
@@ -1017,7 +1026,7 @@ mod tests {
         // -90°: D at (0,1,1) → projects to +Z
         let neg90 = dihedral(
             [1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, 1.0],
-        );
+        ).unwrap();
         assert!(
             (neg90 + 90.0).abs() < 1.0,
             "Expected ~-90°, got {neg90}"
@@ -1026,11 +1035,16 @@ mod tests {
         // +90°: D at (0,1,-1) → projects to -Z
         let pos90 = dihedral(
             [1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, -1.0],
-        );
+        ).unwrap();
         assert!(
             (pos90 - 90.0).abs() < 1.0,
             "Expected ~+90°, got {pos90}"
         );
+
+        // Degenerate geometry: coincident atoms → returns None
+        assert!(dihedral([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]).is_none());
+        // Collinear atoms → returns None
+        assert!(dihedral([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]).is_none());
     }
 
     #[test]

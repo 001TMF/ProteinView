@@ -106,7 +106,7 @@ impl KittyPngImage {
 }
 
 impl Widget for KittyPngImage {
-    fn render(self, area: Rect, buf: &mut Buffer) {
+    fn render(mut self, area: Rect, buf: &mut Buffer) {
         // Encode the image ID as an RGB foreground color — Kitty uses this
         // to associate placeholder characters with the transmitted image.
         let [id_extra, id_r, id_g, id_b] = self.unique_id.to_be_bytes();
@@ -119,7 +119,7 @@ impl Widget for KittyPngImage {
             // The transmit sequence is only written into the first row's
             // first cell; subsequent rows just get placeholders.
             let mut symbol = if y == 0 {
-                self.transmit.clone()
+                std::mem::take(&mut self.transmit)
             } else {
                 String::new()
             };

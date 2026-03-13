@@ -52,13 +52,30 @@ impl Camera {
     /// Auto-rotate speed in radians per second (~0.6 rad/s = one full turn in ~10s).
     const AUTO_ROTATE_SPEED: f64 = 0.6;
 
+    /// Maximum dt (in seconds) that a single tick can apply.  This prevents
+    /// the protein from "jumping" when a frame takes longer than expected or
+    /// when frames are skipped.  At 30 FPS the nominal interval is ~0.033s;
+    /// we allow up to 2x that to accommodate occasional slow frames while
+    /// still clamping large gaps.
+    const MAX_DT: f64 = 0.066;
+
     pub fn tick(&mut self) {
         let now = Instant::now();
-        let dt = now.duration_since(self.last_tick).as_secs_f64();
+        let raw_dt = now.duration_since(self.last_tick).as_secs_f64();
         self.last_tick = now;
+        // Clamp dt so that a long gap (frame skip, slow draw, debugger pause)
+        // never produces a visible jump in auto-rotation.
+        let dt = raw_dt.min(Self::MAX_DT);
         if self.auto_rotate {
             self.rot_y -= Self::AUTO_ROTATE_SPEED * dt;
         }
+    }
+
+    /// Reset the internal tick timer without applying any rotation.
+    /// Call this when skipping frames so the next real tick starts from a
+    /// fresh baseline rather than accumulating all the skipped time.
+    pub fn reset_tick_timer(&mut self) {
+        self.last_tick = Instant::now();
     }
 
     /// Project a 3D point to 2D using rotation matrices + orthographic projection
@@ -145,5 +162,45 @@ mod tests {
         let mut cam = Camera::default();
         cam.rotate_z(1.0);
         assert!(cam.rot_z < 0.0, "rotate_z(+1) should decrease rot_z, got {}", cam.rot_z);
+    }
+
+    #[test]
+    fn tick_clamps_large_dt() {
+        // Simulate a long gap (e.g. frame skip) by creating a camera whose
+        // last_tick is far in the past, then calling tick().  The rotation
+        // should be clamped to MAX_DT worth of movement.
+        let mut cam = Camera::default();
+        cam.auto_rotate = true;
+        // Manually set last_tick 500ms in the past (way more than MAX_DT)
+        cam.last_tick = Instant::now() - std::time::Duration::from_millis(500);
+        cam.tick();
+        // Expected rotation ≈ -AUTO_ROTATE_SPEED * MAX_DT = -0.6 * 0.066 = -0.0396
+        // Without clamping it would be -0.6 * 0.5 = -0.3
+        let expected_max = Camera::AUTO_ROTATE_SPEED * Camera::MAX_DT;
+        assert!(
+            cam.rot_y.abs() <= expected_max + 0.001,
+            "rotation should be clamped to at most {:.4} rad, got {:.4}",
+            expected_max,
+            cam.rot_y.abs()
+        );
+    }
+
+    #[test]
+    fn reset_tick_timer_prevents_jump() {
+        // After reset_tick_timer(), the next tick() should see near-zero dt
+        // and apply negligible rotation.
+        let mut cam = Camera::default();
+        cam.auto_rotate = true;
+        // Set last_tick far in the past
+        cam.last_tick = Instant::now() - std::time::Duration::from_secs(2);
+        // Reset timer (as the main loop does during frame skips)
+        cam.reset_tick_timer();
+        // Immediately tick — dt should be ~0
+        cam.tick();
+        assert!(
+            cam.rot_y.abs() < 0.001,
+            "rotation after reset_tick_timer + immediate tick should be ~0, got {}",
+            cam.rot_y
+        );
     }
 }

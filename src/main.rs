@@ -239,9 +239,16 @@ fn main() -> Result<()> {
         // Adaptive frame skipping: if the previous draw took longer than the
         // tick rate, skip frames proportionally.  User input always forces a
         // redraw so the UI stays responsive.
+        //
+        // Do NOT call app.tick() during skipped frames — that would advance
+        // auto-rotate without a corresponding render, causing the protein to
+        // "jump" when rendering resumes.  Instead we just sleep and let the
+        // camera's dt-clamping handle the gap.
         if frames_to_skip > 0 && !had_input {
             frames_to_skip -= 1;
-            app.tick();
+            // Reset the camera's tick timer so the next real tick doesn't see
+            // a huge accumulated dt from the skipped frames.
+            app.camera.reset_tick_timer();
             std::thread::sleep(tick_rate);
             continue;
         }
@@ -257,6 +264,10 @@ fn main() -> Result<()> {
         // Without this, its diff-based rendering may leave stale characters
         // from the previous mode (e.g. braille dots under a FullHD image).
         if app.needs_clear {
+            // Delete any Kitty graphics images that may be lingering from
+            // a previous FullHD session.  Harmless no-op if there are none.
+            let cleanup = render::kitty_png::KittyPngImage::cleanup_escape();
+            execute!(terminal.backend_mut(), crossterm::style::Print(&cleanup))?;
             terminal.clear()?;
             app.needs_clear = false;
         }

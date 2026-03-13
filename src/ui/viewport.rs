@@ -6,7 +6,7 @@ use ratatui_image::{Image, Resize};
 
 use crate::app::{App, RenderMode};
 use crate::render::braille;
-use crate::render::framebuffer::{framebuffer_to_braille_widget, framebuffer_to_widget};
+use crate::render::framebuffer::framebuffer_to_braille_widget;
 use crate::render::hd;
 use crate::render::kitty_png::KittyPngImage;
 
@@ -31,10 +31,12 @@ pub fn render_viewport(frame: &mut Frame, area: Rect, app: &App) {
             frame.render_widget(canvas, area);
         }
         RenderMode::HalfBlock => {
-            // HalfBlock mode: 1 pixel per column, 2 pixels per row
-            // Rasterize inline and convert to half-block Paragraph widget
-            let width = area.width as f64 * 1.0;
-            let height = area.height as f64 * 2.0;
+            // HalfBlock mode: render at braille resolution (2x4 per cell) through
+            // the HD rasterizer (Lambert shading, z-buffer, depth fog) and convert
+            // to colored braille characters.  This gives the same spatial resolution
+            // as the basic Braille renderer but with much higher quality shading.
+            let width = area.width as f64 * 2.0;
+            let height = area.height as f64 * 4.0;
 
             let fb = hd::render_hd_framebuffer(
                 &app.protein,
@@ -47,7 +49,7 @@ pub fn render_viewport(frame: &mut Frame, area: Rect, app: &App) {
                 app.show_ligands,
             );
 
-            let widget = framebuffer_to_widget(&fb);
+            let widget = framebuffer_to_braille_widget(&fb);
             frame.render_widget(widget, area);
         }
         RenderMode::FullHD => {

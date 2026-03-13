@@ -438,6 +438,7 @@ fn quantize_color(c: [u8; 3], step: u8) -> [u8; 3] {
 /// Colors are quantized (rounded to multiples of 4) before comparison so that
 /// nearby shades get merged into longer runs, reducing terminal output size
 /// while preserving smooth depth-fog gradients for cartoon mode.
+#[allow(dead_code)]
 pub fn framebuffer_to_widget(fb: &Framebuffer) -> Paragraph<'static> {
     // Quantization step: 4 gives 64 levels per channel -- preserves smooth
     // shading gradients while still merging runs.  Use 1 (no quantization)

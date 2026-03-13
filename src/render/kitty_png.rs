@@ -11,6 +11,11 @@
 //! Every cell in the render area is written to, so ratatui's diff engine
 //! properly clears old content — fixing both the braille-bleed-through and
 //! the ghost/smear effect when rotating.
+//!
+//! To prevent flickering/tearing, we use a **ping-pong** double-buffering
+//! scheme with two alternating image IDs.  Before transmitting the new
+//! frame, we delete the *previous* image so Kitty never has two images
+//! overlapping in the same region.
 
 use std::fmt::Write;
 use std::io::Cursor;
@@ -22,8 +27,15 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 
-/// Monotonically increasing image ID so Kitty can track/clean up images.
-static NEXT_ID: AtomicU32 = AtomicU32::new(1);
+/// Ping-pong image IDs: we alternate between two fixed IDs so that each
+/// frame can delete the previous image before displaying the new one.
+/// This avoids both the ever-growing ID counter and overlapping images
+/// that cause horizontal tearing/flickering.
+///
+/// The counter tracks which slot to use next (0 or 1).  The two image
+/// IDs are `PING_PONG_IDS[0]` and `PING_PONG_IDS[1]`.
+static PING_PONG_SLOT: AtomicU32 = AtomicU32::new(0);
+const PING_PONG_IDS: [u32; 2] = [1, 2];
 
 /// A ratatui `Widget` that renders a `DynamicImage` via the Kitty graphics
 /// protocol using PNG compression (`f=100`) and unicode placeholders.
@@ -34,13 +46,35 @@ pub struct KittyPngImage {
 }
 
 impl KittyPngImage {
+    /// Delete all Kitty images managed by this module.
+    ///
+    /// Call this when leaving FullHD mode to free Kitty-side resources and
+    /// prevent stale images from lingering in the terminal's memory.
+    /// Returns the escape sequence as a `String` that must be written to
+    /// the terminal (e.g. via stdout).
+    pub fn cleanup_escape() -> String {
+        let mut s = String::new();
+        for &id in &PING_PONG_IDS {
+            let _ = write!(s, "\x1b_Gq=2,a=d,d=I,i={id}\x1b\\");
+        }
+        s
+    }
+
     /// Create a new compressed Kitty image widget.
     ///
     /// The image is immediately PNG-encoded and base64-chunked into the
     /// Kitty escape sequence.  Call this outside the draw closure if you
     /// want to time encoding separately.
+    ///
+    /// Uses a ping-pong double-buffer scheme: each call alternates between
+    /// two fixed image IDs.  A delete command for the *previous* frame's
+    /// image is prepended so Kitty never renders two overlapping images.
     pub fn new(img: &DynamicImage, area: Rect) -> Self {
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        // Advance the ping-pong slot: 0 -> 1 -> 0 -> 1 ...
+        let slot = PING_PONG_SLOT.fetch_xor(1, Ordering::Relaxed);
+        let id = PING_PONG_IDS[slot as usize & 1];
+        let prev_id = PING_PONG_IDS[(slot as usize & 1) ^ 1];
+
         let (w, h) = (img.width(), img.height());
 
         // Encode as PNG.
@@ -61,7 +95,12 @@ impl KittyPngImage {
             .collect();
         let chunk_count = chunks.len();
 
-        let mut transmit = String::with_capacity(b64.len() + chunk_count * 80);
+        let mut transmit = String::with_capacity(b64.len() + chunk_count * 80 + 64);
+
+        // Delete the previous frame's image BEFORE transmitting the new one.
+        // `a=d` = delete, `d=I` = delete by image ID, `i=<prev_id>`.
+        // `q=2` suppresses OK/error responses from Kitty.
+        write!(transmit, "\x1b_Gq=2,a=d,d=I,i={prev_id}\x1b\\").unwrap();
 
         for (i, chunk) in chunks.iter().enumerate() {
             write!(transmit, "\x1b_Gq=2,").unwrap();

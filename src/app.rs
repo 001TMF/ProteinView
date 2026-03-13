@@ -142,8 +142,8 @@ impl App {
                 0.9 * px_w.min(px_h) / (2.0 * radius)
             }
             RenderMode::HalfBlock => {
-                let px_w = vp_cols * 1.0;
-                let px_h = vp_rows * 2.0;
+                let px_w = vp_cols * 2.0;
+                let px_h = vp_rows * 4.0;
                 0.9 * px_w.min(px_h) / (2.0 * radius)
             }
             RenderMode::Braille => {
@@ -298,7 +298,7 @@ impl App {
                     (vp_cols * 2.0, vp_rows * 4.0)
                 }
             }
-            RenderMode::HalfBlock => (vp_cols * 1.0, vp_rows * 2.0),
+            RenderMode::HalfBlock => (vp_cols * 2.0, vp_rows * 4.0),
             RenderMode::Braille => (vp_cols * 2.0, vp_rows * 4.0),
         };
         self.camera.zoom = 0.9 * px_w.min(px_h) / (2.0 * radius);

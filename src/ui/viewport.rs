@@ -69,9 +69,14 @@ fn render_hd_viewport(frame: &mut Frame, area: Rect, app: &App) {
 
     // If the terminal supports a real graphics protocol, convert the
     // framebuffer to an image and render it through ratatui-image.
+    // Kitty supports RGBA transparency; Sixel/iTerm2 do not, so use
+    // opaque RGB to avoid rendering artifacts on those protocols.
     if proto != ProtocolType::Halfblocks {
-        let rgba_img = fb.to_rgba_image();
-        let dyn_img = DynamicImage::ImageRgba8(rgba_img);
+        let dyn_img = if proto == ProtocolType::Kitty {
+            DynamicImage::ImageRgba8(fb.to_rgba_image())
+        } else {
+            DynamicImage::ImageRgb8(fb.to_rgb_image())
+        };
         match app.picker.new_protocol(dyn_img, area, Resize::Fit(None)) {
             Ok(protocol) => {
                 let widget = Image::new(&protocol);

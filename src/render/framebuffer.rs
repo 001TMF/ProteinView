@@ -1,6 +1,4 @@
-use image::RgbaImage;
-#[cfg(test)]
-use image::RgbImage;
+use image::{RgbImage, RgbaImage};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -324,7 +322,6 @@ impl Framebuffer {
     /// with each pixel's RGB channels copied directly.  This is used by the
     /// ratatui-image integration to send the framebuffer to the terminal via
     /// Sixel, Kitty, or other graphics protocols.
-    #[cfg(test)]
     pub fn to_rgb_image(&self) -> RgbImage {
         let mut img = RgbImage::new(self.width as u32, self.height as u32);
         for y in 0..self.height {
@@ -691,8 +688,12 @@ pub fn normalize(v: [f64; 3]) -> [f64; 3] {
 }
 
 /// Default light direction (normalized) pointing from the upper-right-front.
+///
+/// The X component is negative to compensate for the camera's X-negation
+/// (which corrects chirality so L-amino acids render correctly).  In screen
+/// space this still appears as upper-right lighting.
 pub fn default_light_dir() -> [f64; 3] {
-    normalize([0.3, 0.8, 0.5])
+    normalize([-0.3, 0.8, 0.5])
 }
 
 #[cfg(test)]

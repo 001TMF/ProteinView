@@ -1,3 +1,5 @@
+use image::RgbaImage;
+#[cfg(test)]
 use image::RgbImage;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -322,12 +324,30 @@ impl Framebuffer {
     /// with each pixel's RGB channels copied directly.  This is used by the
     /// ratatui-image integration to send the framebuffer to the terminal via
     /// Sixel, Kitty, or other graphics protocols.
+    #[cfg(test)]
     pub fn to_rgb_image(&self) -> RgbImage {
         let mut img = RgbImage::new(self.width as u32, self.height as u32);
         for y in 0..self.height {
             for x in 0..self.width {
                 let c = self.color[y * self.width + x];
                 img.put_pixel(x as u32, y as u32, image::Rgb(c));
+            }
+        }
+        img
+    }
+
+    /// Convert this framebuffer into an `image::RgbaImage` with transparency.
+    ///
+    /// Background pixels (depth == INFINITY, color == black) get alpha = 0 so
+    /// the terminal background shows through.  Drawn pixels get alpha = 255.
+    pub fn to_rgba_image(&self) -> RgbaImage {
+        let mut img = RgbaImage::new(self.width as u32, self.height as u32);
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let idx = y * self.width + x;
+                let c = self.color[idx];
+                let alpha = if self.depth[idx] >= f64::INFINITY { 0 } else { 255 };
+                img.put_pixel(x as u32, y as u32, image::Rgba([c[0], c[1], c[2], alpha]));
             }
         }
         img

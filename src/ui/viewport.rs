@@ -70,8 +70,8 @@ fn render_hd_viewport(frame: &mut Frame, area: Rect, app: &App) {
     // If the terminal supports a real graphics protocol, convert the
     // framebuffer to an image and render it through ratatui-image.
     if proto != ProtocolType::Halfblocks {
-        let rgb_img = fb.to_rgb_image();
-        let dyn_img = DynamicImage::ImageRgb8(rgb_img);
+        let rgba_img = fb.to_rgba_image();
+        let dyn_img = DynamicImage::ImageRgba8(rgba_img);
         match app.picker.new_protocol(dyn_img, area, Resize::Fit(None)) {
             Ok(protocol) => {
                 let widget = Image::new(&protocol);

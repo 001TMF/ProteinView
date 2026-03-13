@@ -61,13 +61,18 @@ impl KittyPngImage {
     /// `a=T,U=1` for the same ID causes Kitty to atomically replace the
     /// old image data, so there is never a visible gap between frames.
     /// No delete commands are emitted during normal rendering.
-    pub fn new(img: &DynamicImage, area: Rect) -> Self {
+    pub fn new(img: &DynamicImage, area: Rect) -> Option<Self> {
         let (w, h) = (img.width(), img.height());
 
-        // Encode as PNG.
+        // Encode as PNG.  Returns None on failure so the caller can fall
+        // back to braille instead of crashing the TUI.
         let mut png_bytes: Vec<u8> = Vec::new();
-        img.write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)
-            .expect("PNG encoding failed");
+        if img
+            .write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+            .is_err()
+        {
+            return None;
+        }
 
         // Base64.
         let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
@@ -97,11 +102,11 @@ impl KittyPngImage {
             write!(transmit, "m={more};{chunk}\x1b\\").unwrap();
         }
 
-        Self {
+        Some(Self {
             transmit,
             unique_id: IMAGE_ID,
             area,
-        }
+        })
     }
 }
 

@@ -100,22 +100,22 @@ fn render_fullhd_viewport(frame: &mut Frame, area: Rect, app: &App) {
             // This is ~10-20x smaller than ratatui-image's raw RGBA path,
             // making FullHD viable over SSH.
             let dyn_img = DynamicImage::ImageRgba8(fb.to_rgba_image());
-            let widget = KittyPngImage::new(&dyn_img, area);
-            frame.render_widget(widget, area);
-            return;
+            if let Some(widget) = KittyPngImage::new(&dyn_img, area) {
+                frame.render_widget(widget, area);
+                return;
+            }
+            // PNG encoding failed — fall through to braille.
         }
 
         // Sixel/iTerm2: use ratatui-image (no PNG option for Sixel).
-        let dyn_img = DynamicImage::ImageRgb8(fb.to_rgb_image());
-        match app.picker.new_protocol(dyn_img, area, Resize::Fit(None)) {
-            Ok(protocol) => {
+        if proto != ProtocolType::Kitty {
+            let dyn_img = DynamicImage::ImageRgb8(fb.to_rgb_image());
+            if let Ok(protocol) = app.picker.new_protocol(dyn_img, area, Resize::Fit(None)) {
                 let widget = Image::new(&protocol);
                 frame.render_widget(widget, area);
                 return;
             }
-            Err(_) => {
-                // Fall through to braille rendering on error.
-            }
+            // Protocol error — fall through to braille.
         }
     }
 

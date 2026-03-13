@@ -35,9 +35,10 @@ impl VizMode {
 /// Rendering mode for the 3D viewport
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RenderMode {
-    /// Braille dots - highest spatial resolution, monochrome per cell
+    /// Braille dots - highest text-mode spatial resolution, monochrome per cell
     Braille,
-    /// Half-block colored characters - the original "HD", fast everywhere
+    /// HD-quality colored braille via software rasterizer (Lambert shading,
+    /// z-buffer, depth fog).  Fast everywhere including SSH.
     HalfBlock,
     /// Full pixel graphics via Sixel/Kitty/iTerm2 - best quality, high bandwidth
     FullHD,

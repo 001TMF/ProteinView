@@ -8,6 +8,7 @@ use crate::app::{App, RenderMode};
 use crate::render::braille;
 use crate::render::framebuffer::{framebuffer_to_braille_widget, framebuffer_to_widget};
 use crate::render::hd;
+use crate::render::kitty_png::KittyPngImage;
 
 /// Render the main 3D viewport
 pub fn render_viewport(frame: &mut Frame, area: Rect, app: &App) {
@@ -90,15 +91,20 @@ fn render_fullhd_viewport(frame: &mut Frame, area: Rect, app: &App) {
     );
 
     // If the terminal supports a real graphics protocol, convert the
-    // framebuffer to an image and render it through ratatui-image.
-    // Kitty supports RGBA transparency; Sixel/iTerm2 do not, so use
-    // opaque RGB to avoid rendering artifacts on those protocols.
+    // framebuffer to an image and send it.
     if proto != ProtocolType::Halfblocks {
-        let dyn_img = if proto == ProtocolType::Kitty {
-            DynamicImage::ImageRgba8(fb.to_rgba_image())
-        } else {
-            DynamicImage::ImageRgb8(fb.to_rgb_image())
-        };
+        if proto == ProtocolType::Kitty {
+            // Use our custom PNG-compressed Kitty transmitter.
+            // This is ~10-20x smaller than ratatui-image's raw RGBA path,
+            // making FullHD viable over SSH.
+            let dyn_img = DynamicImage::ImageRgba8(fb.to_rgba_image());
+            let widget = KittyPngImage::new(&dyn_img, area);
+            frame.render_widget(widget, area);
+            return;
+        }
+
+        // Sixel/iTerm2: use ratatui-image (no PNG option for Sixel).
+        let dyn_img = DynamicImage::ImageRgb8(fb.to_rgb_image());
         match app.picker.new_protocol(dyn_img, area, Resize::Fit(None)) {
             Ok(protocol) => {
                 let widget = Image::new(&protocol);

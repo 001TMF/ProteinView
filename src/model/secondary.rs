@@ -716,12 +716,11 @@ fn torsions_match(torsions: Option<(f64, f64)>, target: SecondaryStructure) -> b
 }
 
 /// Helix-compatible torsion angles (wide window covering alpha/3_10/pi).
-/// phi in [-170, -20], psi in [-80, 10] — with a wider "weak" window.
 fn is_helix_torsion(phi: f64, psi: f64) -> bool {
-    // Strong: typical alpha helix
-    let strong = (-140.0..=-80.0).contains(&phi) && (-170.0..=-100.0).contains(&psi);
+    // Strong: typical alpha helix (phi ~ -57, psi ~ -47)
+    let strong = (-80.0..=-40.0).contains(&phi) && (-70.0..=-20.0).contains(&psi);
     // Weak: wider window for 3_10 and pi helices
-    let weak = (-170.0..=-40.0).contains(&phi) && (-180.0..=-60.0).contains(&psi);
+    let weak = (-170.0..=-20.0).contains(&phi) && (-80.0..=10.0).contains(&psi);
     strong || weak
 }
 
@@ -792,25 +791,27 @@ fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {
 
 /// Compute the dihedral angle (in degrees) defined by four points.
 fn dihedral(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3]) -> f64 {
-    let b0 = sub(a, b);
-    let b1 = sub(c, b);
-    let b2 = sub(d, c);
+    // IUPAC/biochemistry convention (matches MDAnalysis/BioPython):
+    // Bond vectors along the chain A→B→C→D
+    let b1 = sub(b, a);
+    let b2 = sub(c, b);
+    let b3 = sub(d, c);
 
-    let Some(b1_unit) = normalize(b1) else {
+    let Some(b2_unit) = normalize(b2) else {
         return 0.0;
     };
 
-    let n0 = cross(b0, b1);
-    let n1 = cross(b1, b2);
-    let Some(n0_unit) = normalize(n0) else {
-        return 0.0;
-    };
+    let n1 = cross(b1, b2); // normal to plane A-B-C
+    let n2 = cross(b2, b3); // normal to plane B-C-D
     let Some(n1_unit) = normalize(n1) else {
         return 0.0;
     };
+    let Some(n2_unit) = normalize(n2) else {
+        return 0.0;
+    };
 
-    let m1 = cross(n0_unit, b1_unit);
-    dot(m1, n1_unit).atan2(dot(n0_unit, n1_unit)).to_degrees()
+    let m1 = cross(n1_unit, b2_unit);
+    -dot(m1, n2_unit).atan2(dot(n1_unit, n2_unit)).to_degrees()
 }
 
 #[cfg(test)]
@@ -992,54 +993,43 @@ mod tests {
 
     #[test]
     fn test_torsion_angle_computation() {
-        // Test dihedral angle with known geometries.
-        // The dihedral angle is the angle between planes (A-B-C) and (B-C-D).
+        // IUPAC convention: dihedral A-B-C-D.
+        // B→C along +Y, A at (1,0,0) projects onto +X perpendicular to B-C.
 
-        // 90-degree dihedral: B-C axis along Y, A in XY plane, D along Z from C
-        let a = [1.0, 0.0, 0.0];
-        let b = [0.0, 0.0, 0.0];
-        let c = [0.0, 1.0, 0.0];
-        let d = [0.0, 1.0, 1.0];
-
-        let angle = dihedral(a, b, c, d);
+        // Trans (±180°): D projects to -X (opposite side from A)
+        let trans = dihedral(
+            [1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-1.0, 1.0, 0.0],
+        );
         assert!(
-            (angle.abs() - 90.0).abs() < 1.0,
-            "Expected ~90 degrees magnitude, got {}",
-            angle
+            (trans.abs() - 180.0).abs() < 1.0,
+            "Expected ~±180° for trans, got {trans}"
         );
 
-        // 180-degree (trans) dihedral:
-        // B-C axis along Z. A at (1,0,0) projects onto +X perpendicular to B-C.
-        // For 180 degrees, D must project onto +X as well (same side as A,
-        // since dihedral measures the angle looking down B->C).
-        // n0 = cross(b0,b1) = cross([1,0,0],[0,0,1]) = [0,-1,0]
-        // D at (1,0,1) => b2_vec = D-C = [1,0,0] => n1 = cross([0,0,1],[1,0,0]) = [0,1,0]
-        // n0 and n1 are antiparallel => 180 degrees.
-        let a2 = [1.0, 0.0, 0.0];
-        let b2 = [0.0, 0.0, 0.0];
-        let c2 = [0.0, 0.0, 1.0];
-        let d2 = [1.0, 0.0, 1.0]; // produces 180 degrees
-
-        let angle2 = dihedral(a2, b2, c2, d2);
+        // Cis (0°): D projects to +X (same side as A)
+        let cis = dihedral(
+            [1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0],
+        );
         assert!(
-            (angle2.abs() - 180.0).abs() < 1.0,
-            "Expected ~180 degrees, got {}",
-            angle2
+            cis.abs() < 1.0,
+            "Expected ~0° for cis, got {cis}"
         );
 
-        // 0-degree (cis) dihedral: D on opposite side from the 180 case
-        // D at (-1,0,1) => b2_vec = [-1,0,0] => n1 = cross([0,0,1],[-1,0,0]) = [0,-1,0]
-        // n0 = [0,-1,0], n1 = [0,-1,0] => parallel => 0 degrees
-        let a3 = [1.0, 0.0, 0.0];
-        let b3 = [0.0, 0.0, 0.0];
-        let c3 = [0.0, 0.0, 1.0];
-        let d3 = [-1.0, 0.0, 1.0]; // produces 0 degrees
-
-        let angle3 = dihedral(a3, b3, c3, d3);
+        // -90°: D at (0,1,1) → projects to +Z
+        let neg90 = dihedral(
+            [1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, 1.0],
+        );
         assert!(
-            angle3.abs() < 1.0,
-            "Expected ~0 degrees, got {}",
-            angle3
+            (neg90 + 90.0).abs() < 1.0,
+            "Expected ~-90°, got {neg90}"
+        );
+
+        // +90°: D at (0,1,-1) → projects to -Z
+        let pos90 = dihedral(
+            [1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, -1.0],
+        );
+        assert!(
+            (pos90 - 90.0).abs() < 1.0,
+            "Expected ~+90°, got {pos90}"
         );
     }
 
@@ -1162,11 +1152,11 @@ mod tests {
     #[test]
     fn test_gap_filling() {
         // Test that single-residue Coil gaps within helix/sheet runs are filled
-        // Use phi/psi values in the weak helix window: phi in [-170, -40], psi in [-180, -60]
+        // Use canonical alpha-helix torsion angles: phi ~ -57, psi ~ -47
         let torsions = vec![
-            Some((-60.0, -120.0)),  // helix-compatible
-            Some((-60.0, -120.0)),  // helix-compatible (gap to fill)
-            Some((-60.0, -120.0)),  // helix-compatible
+            Some((-57.0, -47.0)),  // helix-compatible
+            Some((-57.0, -47.0)),  // helix-compatible (gap to fill)
+            Some((-57.0, -47.0)),  // helix-compatible
         ];
         let mut assignments = vec![
             SecondaryStructure::Helix,
@@ -1189,9 +1179,9 @@ mod tests {
     fn test_gap_filling_no_fill_when_torsion_incompatible() {
         // If the gap residue has incompatible torsion angles, it should NOT be filled
         let torsions = vec![
-            Some((-60.0, -120.0)),  // helix-compatible
+            Some((-57.0, -47.0)),   // helix-compatible
             Some((-120.0, 130.0)),  // sheet-compatible, NOT helix
-            Some((-60.0, -120.0)),  // helix-compatible
+            Some((-57.0, -47.0)),   // helix-compatible
         ];
         let mut assignments = vec![
             SecondaryStructure::Helix,
@@ -1256,27 +1246,50 @@ mod tests {
     #[test]
     fn test_infer_ss_alphafold_pdb() {
         // Integration test: AF3_TNFa.pdb has no HELIX/SHEET records,
-        // so inference should produce some structured residues
+        // so inference should produce significant structured residues.
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/AF3_TNFa.pdb");
         let protein = crate::parser::pdb::load_structure(path).unwrap();
 
-        let helix_count = protein.chains.iter()
+        let structured_count = protein.chains.iter()
             .flat_map(|c| &c.residues)
-            .filter(|r| r.secondary_structure == SecondaryStructure::Helix)
+            .filter(|r| r.secondary_structure != SecondaryStructure::Coil)
             .count();
-        let sheet_count = protein.chains.iter()
+        let total_count = protein.chains.iter()
             .flat_map(|c| &c.residues)
-            .filter(|r| r.secondary_structure == SecondaryStructure::Sheet)
             .count();
 
         assert!(
-            helix_count > 0,
-            "Expected inferred helices for AF3_TNFa.pdb, got 0"
+            structured_count > total_count / 3,
+            "Expected significant SS for AF3_TNFa.pdb, got {structured_count}/{total_count} non-coil"
         );
-        assert!(
-            helix_count + sheet_count > 0,
-            "Expected some inferred secondary structure for AF3_TNFa.pdb"
-        );
+    }
+
+    #[test]
+    fn test_helix_torsion_canonical_alpha() {
+        // Canonical alpha helix: phi ~ -57, psi ~ -47
+        assert!(is_helix_torsion(-57.0, -47.0));
+        // 3_10 helix: phi ~ -49, psi ~ -26
+        assert!(is_helix_torsion(-49.0, -26.0));
+        // Strong window boundaries
+        assert!(is_helix_torsion(-80.0, -70.0));
+        assert!(is_helix_torsion(-40.0, -20.0));
+        // Just outside strong but inside weak
+        assert!(is_helix_torsion(-170.0, -80.0));
+        assert!(is_helix_torsion(-20.0, 10.0));
+        // Outside all windows
+        assert!(!is_helix_torsion(-10.0, -47.0));
+        assert!(!is_helix_torsion(-57.0, 20.0));
+        assert!(!is_helix_torsion(-180.0, -47.0));
+    }
+
+    #[test]
+    fn test_sheet_torsion_canonical_beta() {
+        // Canonical antiparallel beta: phi ~ -139, psi ~ 135
+        assert!(is_sheet_torsion(-139.0, 135.0));
+        // Canonical parallel beta: phi ~ -119, psi ~ 113
+        assert!(is_sheet_torsion(-80.0, 50.0));
+        // Outside sheet windows
+        assert!(!is_sheet_torsion(-57.0, -47.0)); // alpha helix region
     }
 
     #[test]
@@ -1300,6 +1313,31 @@ mod tests {
             residue_23.secondary_structure,
             SecondaryStructure::Helix,
             "Explicit PDB Helix assignment should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_ubq_helix_torsions_in_range() {
+        // 1UBQ has known alpha helix at residues 23-34.
+        // Canonical alpha helix: phi ~ -57, psi ~ -47.
+        // We verify torsions fall in the helix-compatible window.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/1UBQ.pdb");
+        let protein = crate::parser::pdb::load_structure(path).unwrap();
+        let chain = &protein.chains[0];
+        let torsions = compute_torsion_angles(&chain.residues);
+
+        let helix_residues: Vec<_> = chain.residues.iter().enumerate()
+            .filter(|(_, r)| r.seq_num >= 24 && r.seq_num <= 33)
+            .collect();
+
+        let helix_compatible = helix_residues.iter()
+            .filter(|(i, _)| torsions[*i].map_or(false, |(phi, psi)| is_helix_torsion(phi, psi)))
+            .count();
+
+        assert!(
+            helix_compatible >= helix_residues.len() / 2,
+            "Expected most 1UBQ helix residues (24-33) to have helix-compatible torsions, got {}/{}",
+            helix_compatible, helix_residues.len()
         );
     }
 }

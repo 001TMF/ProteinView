@@ -132,4 +132,18 @@ mod tests {
         // y = 1.0 * 2.0 + 3.0 = 5.0
         assert!((p.y - 5.0).abs() < 1e-12, "expected y=5.0, got {}", p.y);
     }
+
+    #[test]
+    fn rotate_y_produces_negative_delta() {
+        let mut cam = Camera::default();
+        cam.rotate_y(1.0);
+        assert!(cam.rot_y < 0.0, "rotate_y(+1) should decrease rot_y, got {}", cam.rot_y);
+    }
+
+    #[test]
+    fn rotate_z_produces_negative_delta() {
+        let mut cam = Camera::default();
+        cam.rotate_z(1.0);
+        assert!(cam.rot_z < 0.0, "rotate_z(+1) should decrease rot_z, got {}", cam.rot_z);
+    }
 }

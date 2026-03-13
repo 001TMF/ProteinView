@@ -305,4 +305,22 @@ mod tests {
         };
         assert!(!protein.has_plddt());
     }
+
+    #[test]
+    fn test_has_plddt_borderline_mean_below_threshold() {
+        // Mean = 49.0, just below 50.0 threshold — should reject
+        let protein = protein_from_bfactors(&[
+            45.0, 42.0, 65.0, 48.0, 40.0, 55.0, 50.0, 38.0, 60.0, 47.0,
+        ]);
+        assert!(!protein.has_plddt());
+    }
+
+    #[test]
+    fn test_has_plddt_negative_bfactors() {
+        // NMR structures can have negative B-factors — outside [0,100]
+        let protein = protein_from_bfactors(&[
+            -5.0, 80.0, 75.0, 90.0, 85.0, -2.0, 78.0, 92.0, 70.0, 88.0,
+        ]);
+        assert!(!protein.has_plddt());
+    }
 }

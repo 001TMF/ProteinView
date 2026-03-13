@@ -32,6 +32,13 @@ pub fn render_hd_framebuffer(
     let half_w = px_w as f64 / 2.0;
     let half_h = px_h as f64 / 2.0;
 
+    // Scale line thickness and circle radii relative to framebuffer size.
+    // Values were tuned at ~160px wide (braille resolution) where 1.5px
+    // lines and circles look correct.  At FullHD (~640px+) we scale up
+    // proportionally.  Floor of 1.0 preserves the original look at low
+    // resolutions; ceiling of 3.0 caps growth on 4K terminals.
+    let ts = (px_w as f64 / 500.0).clamp(1.0, 3.0);
+
     match viz_mode {
         VizMode::Cartoon => {
             for tri in mesh {
@@ -53,16 +60,16 @@ pub fn render_hd_framebuffer(
             }
         }
         VizMode::Backbone => {
-            render_backbone_fb(&mut fb, protein, camera, color_scheme, half_w, half_h);
+            render_backbone_fb(&mut fb, protein, camera, color_scheme, half_w, half_h, ts);
         }
         VizMode::Wireframe => {
-            render_wireframe_fb(&mut fb, protein, camera, color_scheme, half_w, half_h);
+            render_wireframe_fb(&mut fb, protein, camera, color_scheme, half_w, half_h, ts);
         }
     }
 
     // Render small molecules as ball-and-stick overlay
     if show_ligands {
-        render_ligands_fb(&mut fb, protein, camera, color_scheme, half_w, half_h);
+        render_ligands_fb(&mut fb, protein, camera, color_scheme, half_w, half_h, ts);
     }
 
     // Post-pass: blend all rasterized pixels toward a cool blue-gray fog color
@@ -105,6 +112,7 @@ fn render_backbone_fb(
     color_scheme: &ColorScheme,
     half_w: f64,
     half_h: f64,
+    ts: f64,
 ) {
     for chain in &protein.chains {
         let mut prev: Option<([f64; 3], [u8; 3])> = None;
@@ -113,9 +121,9 @@ fn render_backbone_fb(
                 let p = camera.project(ca.x, ca.y, ca.z);
                 let px = to_pixel(p.x, p.y, p.z, half_w, half_h);
                 let color = color_to_rgb(color_scheme.residue_color(residue, chain));
-                fb.draw_circle_z(px[0], px[1], px[2], 2.5, color);
+                fb.draw_circle_z(px[0], px[1], px[2], 2.5 * ts, color);
                 if let Some((prev_px, prev_color)) = prev {
-                    fb.draw_thick_line_3d(prev_px, px, prev_color, 2.0);
+                    fb.draw_thick_line_3d(prev_px, px, prev_color, 2.0 * ts);
                 }
                 prev = Some((px, color));
             }
@@ -150,6 +158,7 @@ fn render_wireframe_fb(
     color_scheme: &ColorScheme,
     half_w: f64,
     half_h: f64,
+    ts: f64,
 ) {
     for chain in &protein.chains {
         for residue in &chain.residues {
@@ -167,7 +176,7 @@ fn render_wireframe_fb(
             // Draw small dots at atom positions so atoms are visible at bond
             // intersections.
             for (_, px, color) in &projected {
-                fb.draw_circle_z(px[0], px[1], px[2], 1.5, *color);
+                fb.draw_circle_z(px[0], px[1], px[2], 1.5 * ts, *color);
             }
 
             // Intra-residue bonds (thick lines)
@@ -176,7 +185,7 @@ fn render_wireframe_fb(
                     let (a1, p1, c1) = &projected[i];
                     let (a2, p2, _) = &projected[j];
                     if atoms_bonded_3d(a1.x, a1.y, a1.z, a2.x, a2.y, a2.z) {
-                        fb.draw_thick_line_3d(*p1, *p2, *c1, 1.5);
+                        fb.draw_thick_line_3d(*p1, *p2, *c1, 1.5 * ts);
                     }
                 }
             }
@@ -208,7 +217,7 @@ fn render_wireframe_fb(
                 let px1 = to_pixel(p1.x, p1.y, p1.z, half_w, half_h);
                 let px2 = to_pixel(p2.x, p2.y, p2.z, half_w, half_h);
                 let color = color_to_rgb(color_scheme.atom_color(a1, res_curr, chain));
-                fb.draw_thick_line_3d(px1, px2, color, 1.5);
+                fb.draw_thick_line_3d(px1, px2, color, 1.5 * ts);
             }
         }
     }
@@ -222,6 +231,7 @@ fn render_ligands_fb(
     color_scheme: &ColorScheme,
     half_w: f64,
     half_h: f64,
+    ts: f64,
 ) {
     for ligand in &protein.ligands {
         match ligand.ligand_type {
@@ -231,7 +241,7 @@ fn render_ligands_fb(
                     let p = camera.project(atom.x, atom.y, atom.z);
                     let px = to_pixel(p.x, p.y, p.z, half_w, half_h);
                     let color = color_to_rgb(color_scheme.ligand_atom_color(atom, ligand));
-                    fb.draw_circle_z(px[0], px[1], px[2], 4.5, color);
+                    fb.draw_circle_z(px[0], px[1], px[2], 4.5 * ts, color);
                 }
             }
             LigandType::Ligand => {
@@ -256,7 +266,7 @@ fn render_ligands_fb(
                         "P" => 3.0,
                         "FE" | "Fe" | "ZN" | "Zn" | "MG" | "Mg" => 3.5,
                         _ => 2.5,
-                    };
+                    } * ts;
                     fb.draw_circle_z(px[0], px[1], px[2], radius, *color);
                 }
 
@@ -266,7 +276,7 @@ fn render_ligands_fb(
                         let (a1, p1, c1) = &projected[i];
                         let (a2, p2, _) = &projected[j];
                         if atoms_bonded_3d(a1.x, a1.y, a1.z, a2.x, a2.y, a2.z) {
-                            fb.draw_thick_line_3d(*p1, *p2, *c1, 1.5);
+                            fb.draw_thick_line_3d(*p1, *p2, *c1, 1.5 * ts);
                         }
                     }
                 }

@@ -31,7 +31,12 @@ pub struct Triangle {
 
 impl Framebuffer {
     /// Create a new framebuffer initialized to black with infinite depth.
+    ///
+    /// Width and height are clamped to at least 1 to avoid creating an empty
+    /// framebuffer where any `set_pixel` call would panic with index-out-of-bounds.
     pub fn new(width: usize, height: usize) -> Self {
+        let width = width.max(1);
+        let height = height.max(1);
         let n = width * height;
         Self {
             width,
@@ -197,9 +202,9 @@ impl Framebuffer {
             let t = ((d - z_min) * inv_range).clamp(0.0, 1.0);
             let blend = t * fog_strength;
             let c = &mut self.color[i];
-            c[0] = (c[0] as f64 + (fog_color[0] as f64 - c[0] as f64) * blend) as u8;
-            c[1] = (c[1] as f64 + (fog_color[1] as f64 - c[1] as f64) * blend) as u8;
-            c[2] = (c[2] as f64 + (fog_color[2] as f64 - c[2] as f64) * blend) as u8;
+            c[0] = (c[0] as f64 + (fog_color[0] as f64 - c[0] as f64) * blend).clamp(0.0, 255.0) as u8;
+            c[1] = (c[1] as f64 + (fog_color[1] as f64 - c[1] as f64) * blend).clamp(0.0, 255.0) as u8;
+            c[2] = (c[2] as f64 + (fog_color[2] as f64 - c[2] as f64) * blend).clamp(0.0, 255.0) as u8;
         }
     }
 
@@ -435,9 +440,9 @@ fn quantize_color(c: [u8; 3], step: u8) -> [u8; 3] {
 /// Consecutive cells with identical (fg, bg) pairs are merged into a single
 /// [`Span`] to reduce the number of styled segments ratatui needs to process.
 ///
-/// Colors are quantized (rounded to multiples of 4) before comparison so that
-/// nearby shades get merged into longer runs, reducing terminal output size
-/// while preserving smooth depth-fog gradients for cartoon mode.
+/// Color quantization is available via `quant_step` but currently disabled
+/// (`quant_step = 1`, a no-op).  Set it to e.g. 4 or 8 to reduce distinct
+/// colors and increase run-length merging at the expense of color precision.
 #[cfg(test)]
 pub fn framebuffer_to_widget(fb: &Framebuffer) -> Paragraph<'static> {
     // Quantization step: 4 gives 64 levels per channel -- preserves smooth
@@ -545,7 +550,10 @@ pub fn framebuffer_to_widget(fb: &Framebuffer) -> Paragraph<'static> {
 /// per-cell (rather than per-pixel) coloring.
 ///
 /// Consecutive cells with the same foreground color are merged into a single
-/// [`Span`] for performance (run-length encoding).
+/// [`Span`] for performance (run-length encoding).  Color quantization is
+/// available via `quant_step` but currently disabled (`quant_step = 1`, a
+/// no-op).  Set it to e.g. 4 or 8 to reduce distinct colors and increase
+/// run-length merging at the expense of color precision.
 pub fn framebuffer_to_braille_widget(fb: &Framebuffer) -> Paragraph<'static> {
     // Terminal cell grid dimensions derived from the framebuffer.
     let term_cols = (fb.width + 1) / 2;

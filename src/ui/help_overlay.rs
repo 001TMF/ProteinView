@@ -6,9 +6,12 @@ use ratatui::Frame;
 
 /// Render a centered help overlay
 pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
-    // Center the popup (60x20)
-    let popup_width = 60u16.min(area.width - 4);
-    let popup_height = 21u16.min(area.height - 4);
+    // Center the popup (60x20) — guard against tiny terminals
+    if area.width < 10 || area.height < 10 {
+        return;
+    }
+    let popup_width = 60u16.min(area.width.saturating_sub(4));
+    let popup_height = 21u16.min(area.height.saturating_sub(4));
     let x = (area.width - popup_width) / 2;
     let y = (area.height - popup_height) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -27,6 +30,7 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from(vec![Span::styled("  c          ", Style::default().fg(Color::Yellow)), Span::raw("Cycle color scheme")]),
         Line::from(vec![Span::styled("  v          ", Style::default().fg(Color::Yellow)), Span::raw("Cycle viz mode")]),
         Line::from(vec![Span::styled("  m          ", Style::default().fg(Color::Yellow)), Span::raw("Toggle Braille / HD")]),
+        Line::from(vec![Span::styled("  M          ", Style::default().fg(Color::Yellow)), Span::raw("Toggle HD / FullHD (Sixel/Kitty)")]),
         Line::from(vec![Span::styled("  [ / ]      ", Style::default().fg(Color::Yellow)), Span::raw("Prev / next chain")]),
         Line::from(vec![Span::styled("  g          ", Style::default().fg(Color::Yellow)), Span::raw("Toggle ligand visibility")]),
         Line::from(vec![Span::styled("  Space      ", Style::default().fg(Color::Yellow)), Span::raw("Toggle auto-rotation")]),

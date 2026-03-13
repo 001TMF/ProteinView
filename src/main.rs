@@ -18,7 +18,7 @@ use crossterm::{
 use ratatui::prelude::*;
 use ratatui::layout::{Constraint, Direction, Layout};
 
-use app::App;
+use app::{App, ConnectionType, RenderMode};
 
 macro_rules! log {
     ($file:expr, $($arg:tt)*) => {
@@ -37,9 +37,17 @@ struct Cli {
     /// Path to PDB or mmCIF file
     file: Option<String>,
 
-    /// Use HD pixel rendering (sixel/kitty)
-    #[arg(long, alias = "pixel")]
+    /// Use HD rendering (HalfBlock over SSH, FullHD locally)
+    #[arg(long)]
     hd: bool,
+
+    /// Force full pixel graphics (Sixel/Kitty/iTerm2) regardless of SSH
+    #[arg(long, alias = "pixel")]
+    fullhd: bool,
+
+    /// Render mode: braille, halfblock (or hd), fullhd (or pixel)
+    #[arg(long = "render", value_name = "MODE")]
+    render_mode: Option<String>,
 
     /// Color scheme: structure, element, chain, plddt, bfactor, rainbow
     #[arg(long, default_value = "structure")]
@@ -90,6 +98,34 @@ fn main() -> Result<()> {
         std::fs::File::create(path).expect("cannot create log file")
     });
 
+    // Detect connection type
+    let connection_type = ConnectionType::detect();
+    log!(logfile, "connection type: {:?}", connection_type);
+
+    // Determine render mode from CLI flags
+    let render_mode = if let Some(mode_str) = &cli.render_mode {
+        match mode_str.to_ascii_lowercase().as_str() {
+            "braille" => RenderMode::Braille,
+            "halfblock" | "hd" | "half-block" => RenderMode::HalfBlock,
+            "fullhd" | "pixel" | "full-hd" => RenderMode::FullHD,
+            _ => {
+                eprintln!("Warning: unknown render mode '{}', using default", mode_str);
+                RenderMode::Braille
+            }
+        }
+    } else if cli.fullhd {
+        // --fullhd / --pixel always forces FullHD regardless of SSH
+        RenderMode::FullHD
+    } else if cli.hd {
+        // --hd is SSH-aware: FullHD locally, HalfBlock over SSH
+        match connection_type {
+            ConnectionType::Local => RenderMode::FullHD,
+            ConnectionType::Ssh => RenderMode::HalfBlock,
+        }
+    } else {
+        RenderMode::Braille
+    };
+
     // Get terminal dimensions before entering alternate screen
     let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
     log!(logfile, "terminal size: {}x{}", term_cols, term_rows);
@@ -132,8 +168,8 @@ fn main() -> Result<()> {
     };
 
     // Create app with actual terminal dimensions for dynamic zoom
-    let mut app = App::new(protein, cli.hd, term_cols, term_rows, picker, color_override);
-    log!(logfile, "app created: hd={} chains={} zoom={:.2}", app.hd_mode, app.protein.chains.len(), app.camera.zoom);
+    let mut app = App::new(protein, render_mode, term_cols, term_rows, picker, color_override);
+    log!(logfile, "app created: render_mode={:?} chains={} zoom={:.2}", app.render_mode, app.protein.chains.len(), app.camera.zoom);
 
     // Spawn dedicated input thread — decouples input from rendering so
     // quit always works even when HD rendering is slow
@@ -168,13 +204,20 @@ fn main() -> Result<()> {
                 KeyCode::Char('s') => app.camera.pan(0.0, -1.0),
                 KeyCode::Char('a') => app.camera.pan(-1.0, 0.0),
                 KeyCode::Char('d') => app.camera.pan(1.0, 0.0),
-                KeyCode::Char('r') => app.camera.reset(),
+                KeyCode::Char('r') => {
+                    let (cols, rows) = crossterm::terminal::size().unwrap_or((term_cols, term_rows));
+                    app.camera.reset();
+                    app.recalculate_zoom(cols, rows);
+                },
                 KeyCode::Char('c') => app.cycle_color(),
                 KeyCode::Char('v') => app.cycle_viz_mode(),
                 KeyCode::Char('m') => {
-                    app.hd_mode = !app.hd_mode;
                     let (cols, rows) = crossterm::terminal::size().unwrap_or((term_cols, term_rows));
-                    app.recalculate_zoom(cols, rows);
+                    app.toggle_hd(cols, rows);
+                },
+                KeyCode::Char('M') => {
+                    let (cols, rows) = crossterm::terminal::size().unwrap_or((term_cols, term_rows));
+                    app.toggle_fullhd(cols, rows);
                 },
                 KeyCode::Char('[') => app.prev_chain(),
                 KeyCode::Char(']') => app.next_chain(),
@@ -196,9 +239,16 @@ fn main() -> Result<()> {
         // Adaptive frame skipping: if the previous draw took longer than the
         // tick rate, skip frames proportionally.  User input always forces a
         // redraw so the UI stays responsive.
+        //
+        // Do NOT call app.tick() during skipped frames — that would advance
+        // auto-rotate without a corresponding render, causing the protein to
+        // "jump" when rendering resumes.  Instead we just sleep and let the
+        // camera's dt-clamping handle the gap.
         if frames_to_skip > 0 && !had_input {
             frames_to_skip -= 1;
-            app.tick();
+            // Reset the camera's tick timer so the next real tick doesn't see
+            // a huge accumulated dt from the skipped frames.
+            app.camera.reset_tick_timer();
             std::thread::sleep(tick_rate);
             continue;
         }
@@ -206,8 +256,20 @@ fn main() -> Result<()> {
         // Render
         frame_count += 1;
         if frame_count <= 3 || frame_count % 300 == 0 {
-            log!(logfile, "frame {} render start (hd={} viz={:?} interface={} last_draw={:?})",
-                frame_count, app.hd_mode, app.viz_mode, app.show_interface, last_draw_duration);
+            log!(logfile, "frame {} render start (render_mode={:?} viz={:?} interface={} last_draw={:?})",
+                frame_count, app.render_mode, app.viz_mode, app.show_interface, last_draw_duration);
+        }
+
+        // After a render-mode switch, force ratatui to redraw every cell.
+        // Without this, its diff-based rendering may leave stale characters
+        // from the previous mode (e.g. braille dots under a FullHD image).
+        if app.needs_clear {
+            // Delete any Kitty graphics images that may be lingering from
+            // a previous FullHD session.  Harmless no-op if there are none.
+            let cleanup = render::kitty_png::KittyPngImage::cleanup_escape();
+            execute!(terminal.backend_mut(), crossterm::style::Print(&cleanup))?;
+            terminal.clear()?;
+            app.needs_clear = false;
         }
 
         let draw_start = Instant::now();
@@ -268,10 +330,13 @@ fn main() -> Result<()> {
 
         app.tick();
 
-        // Always sleep to cap at ~30 FPS and prevent flooding stdout
-        // (HD mode can produce ~170KB of ANSI sequences per frame; without
-        // throttling the pty buffer fills and write() blocks, freezing the app)
-        std::thread::sleep(tick_rate);
+        // Sleep for the remainder of the tick period to cap at ~30 FPS.
+        // Account for the time already spent drawing so the frame rate stays
+        // consistent regardless of render cost.
+        let elapsed = draw_start.elapsed();
+        if let Some(remaining) = tick_rate.checked_sub(elapsed) {
+            std::thread::sleep(remaining);
+        }
     }
 
     // Signal input thread to stop

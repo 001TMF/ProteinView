@@ -1657,6 +1657,7 @@ name = "proteinview"
 version = "0.2.6"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "crossterm",
  "image",

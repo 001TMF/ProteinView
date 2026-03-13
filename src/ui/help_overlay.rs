@@ -26,7 +26,7 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from(vec![Span::styled("  r          ", Style::default().fg(Color::Yellow)), Span::raw("Reset view")]),
         Line::from(vec![Span::styled("  c          ", Style::default().fg(Color::Yellow)), Span::raw("Cycle color scheme")]),
         Line::from(vec![Span::styled("  v          ", Style::default().fg(Color::Yellow)), Span::raw("Cycle viz mode")]),
-        Line::from(vec![Span::styled("  m          ", Style::default().fg(Color::Yellow)), Span::raw("Toggle Braille / HD")]),
+        Line::from(vec![Span::styled("  m          ", Style::default().fg(Color::Yellow)), Span::raw("Cycle render mode (Braille \u{2192} HD \u{2192} FullHD)")]),
         Line::from(vec![Span::styled("  [ / ]      ", Style::default().fg(Color::Yellow)), Span::raw("Prev / next chain")]),
         Line::from(vec![Span::styled("  g          ", Style::default().fg(Color::Yellow)), Span::raw("Toggle ligand visibility")]),
         Line::from(vec![Span::styled("  Space      ", Style::default().fg(Color::Yellow)), Span::raw("Toggle auto-rotation")]),

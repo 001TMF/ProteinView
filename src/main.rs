@@ -18,7 +18,7 @@ use crossterm::{
 use ratatui::prelude::*;
 use ratatui::layout::{Constraint, Direction, Layout};
 
-use app::App;
+use app::{App, ConnectionType, RenderMode};
 
 macro_rules! log {
     ($file:expr, $($arg:tt)*) => {
@@ -37,9 +37,17 @@ struct Cli {
     /// Path to PDB or mmCIF file
     file: Option<String>,
 
-    /// Use HD pixel rendering (sixel/kitty)
-    #[arg(long, alias = "pixel")]
+    /// Use HD rendering (HalfBlock over SSH, FullHD locally)
+    #[arg(long)]
     hd: bool,
+
+    /// Force full pixel graphics (Sixel/Kitty/iTerm2) regardless of SSH
+    #[arg(long, alias = "pixel")]
+    fullhd: bool,
+
+    /// Render mode: braille, halfblock (or hd), fullhd (or pixel)
+    #[arg(long = "render", value_name = "MODE")]
+    render_mode: Option<String>,
 
     /// Color scheme: structure, element, chain, plddt, bfactor, rainbow
     #[arg(long, default_value = "structure")]
@@ -90,6 +98,34 @@ fn main() -> Result<()> {
         std::fs::File::create(path).expect("cannot create log file")
     });
 
+    // Detect connection type
+    let connection_type = ConnectionType::detect();
+    log!(logfile, "connection type: {:?}", connection_type);
+
+    // Determine render mode from CLI flags
+    let render_mode = if let Some(mode_str) = &cli.render_mode {
+        match mode_str.to_ascii_lowercase().as_str() {
+            "braille" => RenderMode::Braille,
+            "halfblock" | "hd" | "half-block" => RenderMode::HalfBlock,
+            "fullhd" | "pixel" | "full-hd" => RenderMode::FullHD,
+            _ => {
+                eprintln!("Warning: unknown render mode '{}', using default", mode_str);
+                RenderMode::Braille
+            }
+        }
+    } else if cli.fullhd {
+        // --fullhd / --pixel always forces FullHD regardless of SSH
+        RenderMode::FullHD
+    } else if cli.hd {
+        // --hd is SSH-aware: FullHD locally, HalfBlock over SSH
+        match connection_type {
+            ConnectionType::Local => RenderMode::FullHD,
+            ConnectionType::Ssh => RenderMode::HalfBlock,
+        }
+    } else {
+        RenderMode::Braille
+    };
+
     // Get terminal dimensions before entering alternate screen
     let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
     log!(logfile, "terminal size: {}x{}", term_cols, term_rows);
@@ -132,8 +168,8 @@ fn main() -> Result<()> {
     };
 
     // Create app with actual terminal dimensions for dynamic zoom
-    let mut app = App::new(protein, cli.hd, term_cols, term_rows, picker, color_override);
-    log!(logfile, "app created: hd={} chains={} zoom={:.2}", app.hd_mode, app.protein.chains.len(), app.camera.zoom);
+    let mut app = App::new(protein, render_mode, term_cols, term_rows, picker, color_override);
+    log!(logfile, "app created: render_mode={:?} chains={} zoom={:.2}", app.render_mode, app.protein.chains.len(), app.camera.zoom);
 
     // Spawn dedicated input thread — decouples input from rendering so
     // quit always works even when HD rendering is slow
@@ -172,9 +208,8 @@ fn main() -> Result<()> {
                 KeyCode::Char('c') => app.cycle_color(),
                 KeyCode::Char('v') => app.cycle_viz_mode(),
                 KeyCode::Char('m') => {
-                    app.hd_mode = !app.hd_mode;
                     let (cols, rows) = crossterm::terminal::size().unwrap_or((term_cols, term_rows));
-                    app.recalculate_zoom(cols, rows);
+                    app.cycle_render_mode(cols, rows);
                 },
                 KeyCode::Char('[') => app.prev_chain(),
                 KeyCode::Char(']') => app.next_chain(),
@@ -206,8 +241,8 @@ fn main() -> Result<()> {
         // Render
         frame_count += 1;
         if frame_count <= 3 || frame_count % 300 == 0 {
-            log!(logfile, "frame {} render start (hd={} viz={:?} interface={} last_draw={:?})",
-                frame_count, app.hd_mode, app.viz_mode, app.show_interface, last_draw_duration);
+            log!(logfile, "frame {} render start (render_mode={:?} viz={:?} interface={} last_draw={:?})",
+                frame_count, app.render_mode, app.viz_mode, app.show_interface, last_draw_duration);
         }
 
         let draw_start = Instant::now();
@@ -269,8 +304,6 @@ fn main() -> Result<()> {
         app.tick();
 
         // Always sleep to cap at ~30 FPS and prevent flooding stdout
-        // (HD mode can produce ~170KB of ANSI sequences per frame; without
-        // throttling the pty buffer fills and write() blocks, freezing the app)
         std::thread::sleep(tick_rate);
     }
 

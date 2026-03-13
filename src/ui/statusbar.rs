@@ -17,9 +17,10 @@ pub fn render_statusbar(frame: &mut Frame, area: Rect, app: &App) {
     let res_count = app.protein.residue_count();
     let render_mode_name = app.render_mode.name();
 
+    let border_fill = (area.width as usize).saturating_sub(2);
     let status = Paragraph::new(Line::from(vec![
         Span::styled("\u{251c}", Style::default().fg(Color::DarkGray)),
-        Span::styled("\u{2500}".repeat(area.width as usize - 2), Style::default().fg(Color::DarkGray)),
+        Span::styled("\u{2500}".repeat(border_fill), Style::default().fg(Color::DarkGray)),
         Span::styled("\u{2524}", Style::default().fg(Color::DarkGray)),
     ]));
     frame.render_widget(status, area);

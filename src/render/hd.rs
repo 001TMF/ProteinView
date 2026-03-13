@@ -36,8 +36,8 @@ pub fn render_hd_framebuffer(
     // Values below were tuned for FullHD (~640px wide).  At HalfBlock
     // resolution (~80px) they would be proportionally 8x too large, so we
     // scale down automatically.  Clamped so things stay visible at very
-    // low resolutions.
-    let ts = (px_w as f64 / 500.0).clamp(0.3, 1.5);
+    // low resolutions and proportional at high resolutions (4K terminals).
+    let ts = (px_w as f64 / 500.0).clamp(0.3, 3.0);
 
     match viz_mode {
         VizMode::Cartoon => {

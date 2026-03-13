@@ -204,7 +204,11 @@ fn main() -> Result<()> {
                 KeyCode::Char('s') => app.camera.pan(0.0, -1.0),
                 KeyCode::Char('a') => app.camera.pan(-1.0, 0.0),
                 KeyCode::Char('d') => app.camera.pan(1.0, 0.0),
-                KeyCode::Char('r') => app.camera.reset(),
+                KeyCode::Char('r') => {
+                    let (cols, rows) = crossterm::terminal::size().unwrap_or((term_cols, term_rows));
+                    app.camera.reset();
+                    app.recalculate_zoom(cols, rows);
+                },
                 KeyCode::Char('c') => app.cycle_color(),
                 KeyCode::Char('v') => app.cycle_viz_mode(),
                 KeyCode::Char('m') => {
@@ -247,6 +251,14 @@ fn main() -> Result<()> {
         if frame_count <= 3 || frame_count % 300 == 0 {
             log!(logfile, "frame {} render start (render_mode={:?} viz={:?} interface={} last_draw={:?})",
                 frame_count, app.render_mode, app.viz_mode, app.show_interface, last_draw_duration);
+        }
+
+        // After a render-mode switch, force ratatui to redraw every cell.
+        // Without this, its diff-based rendering may leave stale characters
+        // from the previous mode (e.g. braille dots under a FullHD image).
+        if app.needs_clear {
+            terminal.clear()?;
+            app.needs_clear = false;
         }
 
         let draw_start = Instant::now();
@@ -307,8 +319,13 @@ fn main() -> Result<()> {
 
         app.tick();
 
-        // Always sleep to cap at ~30 FPS and prevent flooding stdout
-        std::thread::sleep(tick_rate);
+        // Sleep for the remainder of the tick period to cap at ~30 FPS.
+        // Account for the time already spent drawing so the frame rate stays
+        // consistent regardless of render cost.
+        let elapsed = draw_start.elapsed();
+        if let Some(remaining) = tick_rate.checked_sub(elapsed) {
+            std::thread::sleep(remaining);
+        }
     }
 
     // Signal input thread to stop

@@ -100,6 +100,10 @@ pub struct App {
     pub ssh_hd_warning: bool,
     /// Countdown frames to auto-dismiss the SSH HD warning (~90 frames = 3 seconds at 30fps).
     pub ssh_hd_warning_frames: u8,
+    /// Set to `true` after a render-mode switch so the main loop can call
+    /// `terminal.clear()` before the next draw, forcing ratatui to redraw
+    /// every cell and preventing stale content from the previous mode.
+    pub needs_clear: bool,
 }
 
 impl App {
@@ -185,6 +189,7 @@ impl App {
             connection_type,
             ssh_hd_warning: false,
             ssh_hd_warning_frames: 0,
+            needs_clear: false,
         }
     }
 
@@ -306,6 +311,10 @@ impl App {
             RenderMode::Braille => RenderMode::HalfBlock,
             _ => RenderMode::Braille,
         };
+        // Dismiss any stale SSH warning (no longer in FullHD)
+        self.ssh_hd_warning = false;
+        self.ssh_hd_warning_frames = 0;
+        self.needs_clear = true;
         self.recalculate_zoom(term_cols, term_rows);
     }
 
@@ -317,11 +326,17 @@ impl App {
             _ => RenderMode::FullHD,
         };
 
+        self.needs_clear = true;
+
         if self.render_mode == RenderMode::FullHD
             && self.connection_type == ConnectionType::Ssh
         {
             self.ssh_hd_warning = true;
             self.ssh_hd_warning_frames = 90;
+        } else {
+            // Leaving FullHD — dismiss any active SSH warning
+            self.ssh_hd_warning = false;
+            self.ssh_hd_warning_frames = 0;
         }
 
         self.recalculate_zoom(term_cols, term_rows);

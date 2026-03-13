@@ -21,7 +21,9 @@ impl ColorSchemeType {
         match self {
             Self::Structure => Self::Element,
             Self::Element => Self::Chain,
-            Self::Chain => {
+            Self::Chain => Self::BFactor,
+            Self::BFactor => Self::Rainbow,
+            Self::Rainbow => {
                 if has_plddt {
                     Self::Plddt
                 } else {
@@ -29,9 +31,6 @@ impl ColorSchemeType {
                 }
             }
             Self::Plddt => Self::Structure,
-            // BFactor and Rainbow are accessible via --color CLI flag
-            Self::BFactor => Self::Structure,
-            Self::Rainbow => Self::Structure,
             // Interface is toggled separately via 'f' key
             Self::Interface => Self::Structure,
         }
@@ -576,16 +575,20 @@ mod tests {
 
     #[test]
     fn test_plddt_next_cycling() {
-        // With pLDDT available: Structure -> Element -> Chain -> Plddt -> Structure
+        // With pLDDT: Structure -> Element -> Chain -> BFactor -> Rainbow -> Plddt -> Structure
         assert_eq!(ColorSchemeType::Structure.next(true), ColorSchemeType::Element);
         assert_eq!(ColorSchemeType::Element.next(true), ColorSchemeType::Chain);
-        assert_eq!(ColorSchemeType::Chain.next(true), ColorSchemeType::Plddt);
+        assert_eq!(ColorSchemeType::Chain.next(true), ColorSchemeType::BFactor);
+        assert_eq!(ColorSchemeType::BFactor.next(true), ColorSchemeType::Rainbow);
+        assert_eq!(ColorSchemeType::Rainbow.next(true), ColorSchemeType::Plddt);
         assert_eq!(ColorSchemeType::Plddt.next(true), ColorSchemeType::Structure);
 
-        // Without pLDDT: Structure -> Element -> Chain -> Structure (skips Plddt)
+        // Without pLDDT: Structure -> Element -> Chain -> BFactor -> Rainbow -> Structure
         assert_eq!(ColorSchemeType::Structure.next(false), ColorSchemeType::Element);
         assert_eq!(ColorSchemeType::Element.next(false), ColorSchemeType::Chain);
-        assert_eq!(ColorSchemeType::Chain.next(false), ColorSchemeType::Structure);
+        assert_eq!(ColorSchemeType::Chain.next(false), ColorSchemeType::BFactor);
+        assert_eq!(ColorSchemeType::BFactor.next(false), ColorSchemeType::Rainbow);
+        assert_eq!(ColorSchemeType::Rainbow.next(false), ColorSchemeType::Structure);
 
         // Interface always cycles to Structure regardless of pLDDT flag
         assert_eq!(ColorSchemeType::Interface.next(true), ColorSchemeType::Structure);

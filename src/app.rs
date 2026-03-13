@@ -44,15 +44,6 @@ pub enum RenderMode {
 }
 
 impl RenderMode {
-    /// Cycle to the next render mode: Braille → HalfBlock → FullHD → Braille
-    pub fn next(&self) -> Self {
-        match self {
-            Self::Braille => Self::HalfBlock,
-            Self::HalfBlock => Self::FullHD,
-            Self::FullHD => Self::Braille,
-        }
-    }
-
     pub fn name(&self) -> &str {
         match self {
             Self::Braille => "Braille",
@@ -308,11 +299,24 @@ impl App {
         self.camera.zoom = 0.9 * px_w.min(px_h) / (2.0 * radius);
     }
 
-    /// Cycle to the next render mode and trigger SSH warning if needed.
-    pub fn cycle_render_mode(&mut self, term_cols: u16, term_rows: u16) {
-        self.render_mode = self.render_mode.next();
+    /// Toggle between Braille and HalfBlock (HD) mode.
+    /// Bound to `m`.
+    pub fn toggle_hd(&mut self, term_cols: u16, term_rows: u16) {
+        self.render_mode = match self.render_mode {
+            RenderMode::Braille => RenderMode::HalfBlock,
+            _ => RenderMode::Braille,
+        };
+        self.recalculate_zoom(term_cols, term_rows);
+    }
 
-        // Warn when entering FullHD over SSH
+    /// Upgrade to FullHD (Sixel/Kitty) or back to HalfBlock.
+    /// Bound to `M` (Shift+M).  Warns when entering FullHD over SSH.
+    pub fn toggle_fullhd(&mut self, term_cols: u16, term_rows: u16) {
+        self.render_mode = match self.render_mode {
+            RenderMode::FullHD => RenderMode::HalfBlock,
+            _ => RenderMode::FullHD,
+        };
+
         if self.render_mode == RenderMode::FullHD
             && self.connection_type == ConnectionType::Ssh
         {

@@ -209,7 +209,11 @@ fn main() -> Result<()> {
                 KeyCode::Char('v') => app.cycle_viz_mode(),
                 KeyCode::Char('m') => {
                     let (cols, rows) = crossterm::terminal::size().unwrap_or((term_cols, term_rows));
-                    app.cycle_render_mode(cols, rows);
+                    app.toggle_hd(cols, rows);
+                },
+                KeyCode::Char('M') => {
+                    let (cols, rows) = crossterm::terminal::size().unwrap_or((term_cols, term_rows));
+                    app.toggle_fullhd(cols, rows);
                 },
                 KeyCode::Char('[') => app.prev_chain(),
                 KeyCode::Char(']') => app.next_chain(),

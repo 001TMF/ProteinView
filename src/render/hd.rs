@@ -33,11 +33,11 @@ pub fn render_hd_framebuffer(
     let half_h = px_h as f64 / 2.0;
 
     // Scale line thickness and circle radii relative to framebuffer size.
-    // Values below were tuned for FullHD (~640px wide).  At HalfBlock
-    // resolution (~80px) they would be proportionally 8x too large, so we
-    // scale down automatically.  Clamped so things stay visible at very
-    // low resolutions and proportional at high resolutions (4K terminals).
-    let ts = (px_w as f64 / 500.0).clamp(0.3, 3.0);
+    // Values were tuned at ~160px wide (braille resolution) where 1.5px
+    // lines and circles look correct.  At FullHD (~640px+) we scale up
+    // proportionally.  Floor of 1.0 preserves the original look at low
+    // resolutions; ceiling of 3.0 caps growth on 4K terminals.
+    let ts = (px_w as f64 / 500.0).clamp(1.0, 3.0);
 
     match viz_mode {
         VizMode::Cartoon => {

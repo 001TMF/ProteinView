@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crate::model::protein::{Protein, Chain, MoleculeType, Residue, Atom, SecondaryStructure, RNA_RESIDUES, DNA_RESIDUES, Ligand, LigandType, WATER_NAMES, COMMON_IONS};
-use crate::model::secondary::{assign_from_pdb_file, assign_from_cif_file};
+use crate::model::secondary::{assign_from_pdb_file, assign_from_cif_file, infer_secondary_structure};
 
 /// Load a protein structure from a PDB or mmCIF file
 pub fn load_structure(path: &str) -> Result<Protein> {
@@ -95,6 +95,10 @@ pub fn load_structure(path: &str) -> Result<Protein> {
             assign_from_cif_file(&mut protein, path);
         }
     }
+
+    // Infer secondary structure from backbone geometry for any protein chains
+    // that still lack SS annotations (e.g. AlphaFold PDBs without HELIX/SHEET records).
+    infer_secondary_structure(&mut protein.chains);
 
     Ok(protein)
 }

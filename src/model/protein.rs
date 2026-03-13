@@ -197,4 +197,130 @@ impl Protein {
     pub fn ligand_atom_count(&self) -> usize {
         self.ligands.iter().flat_map(|l| &l.atoms).count()
     }
+
+    /// Heuristically detect whether the B-factor column stores pLDDT scores.
+    ///
+    /// AlphaFold/ModelCIF outputs store confidence values in [0, 100], with
+    /// most atoms above 50 and many above 70.  Classic experimental B-factors
+    /// are usually much lower on average even when they overlap numerically.
+    ///
+    /// Only polymer chain atoms are considered (ligands are excluded).
+    pub fn has_plddt(&self) -> bool {
+        let mut total = 0usize;
+        let mut in_range = 0usize;
+        let mut high_conf = 0usize;
+        let mut sum = 0.0f64;
+
+        for chain in &self.chains {
+            if chain.molecule_type == MoleculeType::SmallMolecule {
+                continue;
+            }
+            for residue in &chain.residues {
+                for atom in &residue.atoms {
+                    total += 1;
+                    let value = atom.b_factor;
+                    sum += value;
+                    if (0.0..=100.0).contains(&value) {
+                        in_range += 1;
+                    }
+                    if value >= 70.0 {
+                        high_conf += 1;
+                    }
+                }
+            }
+        }
+
+        if total == 0 {
+            return false;
+        }
+
+        let mean = sum / total as f64;
+        let in_range_fraction = in_range as f64 / total as f64;
+        let high_conf_fraction = high_conf as f64 / total as f64;
+
+        // All three conditions must be true:
+        // 1) >= 95% of B-factors in [0, 100]
+        // 2) Mean B-factor >= 50
+        // 3) >= 25% of atoms have B-factor >= 70
+        in_range_fraction >= 0.95 && mean >= 50.0 && high_conf_fraction >= 0.25
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn atom_with_bfactor(b: f64) -> Atom {
+        Atom {
+            name: "CA".to_string(),
+            element: "C".to_string(),
+            x: 0.0, y: 0.0, z: 0.0,
+            b_factor: b,
+            is_backbone: true,
+            is_hetero: false,
+        }
+    }
+
+    fn protein_from_bfactors(values: &[f64]) -> Protein {
+        Protein {
+            name: "test".to_string(),
+            chains: vec![Chain {
+                id: "A".to_string(),
+                molecule_type: MoleculeType::Protein,
+                residues: values.iter().enumerate().map(|(i, &b)| Residue {
+                    name: "ALA".to_string(),
+                    seq_num: i as i32 + 1,
+                    atoms: vec![atom_with_bfactor(b)],
+                    secondary_structure: SecondaryStructure::Coil,
+                }).collect(),
+            }],
+            ligands: vec![],
+        }
+    }
+
+    #[test]
+    fn test_has_plddt_alphafold_like() {
+        // Typical AlphaFold pLDDT scores: mostly high, all in [0,100]
+        let protein = protein_from_bfactors(&[
+            95.0, 92.0, 88.0, 76.0, 67.0, 54.0, 91.0, 85.0, 73.0, 80.0,
+        ]);
+        assert!(protein.has_plddt());
+    }
+
+    #[test]
+    fn test_has_plddt_crystallographic() {
+        // Typical crystallographic B-factors: low values, wide range
+        let protein = protein_from_bfactors(&[
+            12.0, 18.0, 22.0, 30.0, 16.0, 25.0, 8.0, 14.0, 20.0, 35.0,
+        ]);
+        assert!(!protein.has_plddt());
+    }
+
+    #[test]
+    fn test_has_plddt_empty_protein() {
+        let protein = Protein {
+            name: "empty".to_string(),
+            chains: vec![],
+            ligands: vec![],
+        };
+        assert!(!protein.has_plddt());
+    }
+
+    #[test]
+    fn test_has_plddt_borderline_mean_below_threshold() {
+        // Mean = 49.0, just below 50.0 threshold — should reject
+        let protein = protein_from_bfactors(&[
+            45.0, 42.0, 65.0, 48.0, 40.0, 55.0, 50.0, 38.0, 60.0, 47.0,
+        ]);
+        assert!(!protein.has_plddt());
+    }
+
+    #[test]
+    fn test_has_plddt_negative_bfactors() {
+        // NMR structures can have negative B-factors — outside [0,100]
+        let protein = protein_from_bfactors(&[
+            -5.0, 80.0, 75.0, 90.0, 85.0, -2.0, 78.0, 92.0, 70.0, 88.0,
+        ]);
+        assert!(!protein.has_plddt());
+    }
 }

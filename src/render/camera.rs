@@ -42,8 +42,8 @@ impl Camera {
     const PAN_STEP: f64 = 2.0;
 
     pub fn rotate_x(&mut self, dir: f64) { self.rot_x += dir * Self::ROT_STEP; }
-    pub fn rotate_y(&mut self, dir: f64) { self.rot_y += dir * Self::ROT_STEP; }
-    pub fn rotate_z(&mut self, dir: f64) { self.rot_z += dir * Self::ROT_STEP; }
+    pub fn rotate_y(&mut self, dir: f64) { self.rot_y -= dir * Self::ROT_STEP; }
+    pub fn rotate_z(&mut self, dir: f64) { self.rot_z -= dir * Self::ROT_STEP; }
     pub fn zoom_in(&mut self) { self.zoom *= 1.0 + Self::ZOOM_STEP; }
     pub fn zoom_out(&mut self) { self.zoom *= 1.0 - Self::ZOOM_STEP; }
     pub fn pan(&mut self, dx: f64, dy: f64) { self.pan_x += dx * Self::PAN_STEP; self.pan_y += dy * Self::PAN_STEP; }
@@ -57,7 +57,7 @@ impl Camera {
         let dt = now.duration_since(self.last_tick).as_secs_f64();
         self.last_tick = now;
         if self.auto_rotate {
-            self.rot_y += Self::AUTO_ROTATE_SPEED * dt;
+            self.rot_y -= Self::AUTO_ROTATE_SPEED * dt;
         }
     }
 
@@ -80,9 +80,70 @@ impl Camera {
 
         // Apply zoom and pan (orthographic projection)
         Projected {
-            x: x3 * self.zoom + self.pan_x,
+            x: -x3 * self.zoom + self.pan_x,
             y: y3 * self.zoom + self.pan_y,
             z: z2,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_identity_negates_x() {
+        // With identity rotation (all angles zero) and unit zoom,
+        // a point at positive world-X should project to negative screen-X.
+        // This ensures a right-handed coordinate system so L-amino acids
+        // are not rendered as their mirror-image D-amino acids.
+        let cam = Camera::default();
+        let p = cam.project(1.0, 0.0, 0.0);
+        assert!(
+            p.x < 0.0,
+            "positive world-X should project to negative screen-X, got {}",
+            p.x
+        );
+        assert!((p.y).abs() < 1e-12, "Y should be zero for a point on the X axis");
+    }
+
+    #[test]
+    fn project_identity_preserves_y() {
+        // Y axis should pass through without negation.
+        let cam = Camera::default();
+        let p = cam.project(0.0, 1.0, 0.0);
+        assert!(
+            p.y > 0.0,
+            "positive world-Y should project to positive screen-Y, got {}",
+            p.y
+        );
+        assert!((p.x).abs() < 1e-12, "X should be zero for a point on the Y axis");
+    }
+
+    #[test]
+    fn project_respects_zoom_and_pan() {
+        let mut cam = Camera::default();
+        cam.zoom = 2.0;
+        cam.pan_x = 5.0;
+        cam.pan_y = 3.0;
+        let p = cam.project(1.0, 1.0, 0.0);
+        // x = -1.0 * 2.0 + 5.0 = 3.0
+        assert!((p.x - 3.0).abs() < 1e-12, "expected x=3.0, got {}", p.x);
+        // y = 1.0 * 2.0 + 3.0 = 5.0
+        assert!((p.y - 5.0).abs() < 1e-12, "expected y=5.0, got {}", p.y);
+    }
+
+    #[test]
+    fn rotate_y_produces_negative_delta() {
+        let mut cam = Camera::default();
+        cam.rotate_y(1.0);
+        assert!(cam.rot_y < 0.0, "rotate_y(+1) should decrease rot_y, got {}", cam.rot_y);
+    }
+
+    #[test]
+    fn rotate_z_produces_negative_delta() {
+        let mut cam = Camera::default();
+        cam.rotate_z(1.0);
+        assert!(cam.rot_z < 0.0, "rotate_z(+1) should decrease rot_z, got {}", cam.rot_z);
     }
 }

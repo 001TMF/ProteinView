@@ -112,7 +112,9 @@ impl Widget for KittyPngImage {
         let [id_extra, id_r, id_g, id_b] = self.unique_id.to_be_bytes();
         let id_color = format!("\x1b[38;2;{id_r};{id_g};{id_b}m");
 
-        let full_height = area.height.min(self.area.height);
+        // Cap to 297 rows — the maximum the DIACRITICS table can address.
+        // 297 rows covers terminals up to ~4700px tall at 16px font, which is plenty.
+        let full_height = area.height.min(self.area.height).min(297);
         let full_width = area.width.min(self.area.width);
 
         for y in 0..full_height {

@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::{App, ConnectionType};
+use crate::app::{App, ConnectionType, RenderMode, VizMode};
 
 /// Render the status bar showing current mode and info
 pub fn render_statusbar(frame: &mut Frame, area: Rect, app: &App) {
@@ -44,9 +44,18 @@ pub fn render_statusbar(frame: &mut Frame, area: Rect, app: &App) {
             ));
         }
 
+        // In Braille mode, Cartoon is silently degraded to Backbone rendering
+        // (the basic braille renderer has no triangle mesh support).  Show this
+        // honestly so the user isn't confused.
+        let viz_label = if app.render_mode == RenderMode::Braille && app.viz_mode == VizMode::Cartoon {
+            "Backbone*"
+        } else {
+            app.viz_mode.name()
+        };
+
         spans.extend_from_slice(&[
             Span::styled("\u{2502} ", Style::default().fg(Color::DarkGray)),
-            Span::styled(app.viz_mode.name(), Style::default().fg(Color::Green)),
+            Span::styled(viz_label, Style::default().fg(Color::Green)),
             Span::styled(" \u{2502} ", Style::default().fg(Color::DarkGray)),
             Span::styled(app.color_scheme.scheme_type.name(), Style::default().fg(Color::Yellow)),
             Span::styled(" \u{2502} ", Style::default().fg(Color::DarkGray)),

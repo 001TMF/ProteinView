@@ -62,6 +62,12 @@ pub enum ConnectionType {
 
 impl ConnectionType {
     /// Detect whether the current session is running over SSH.
+    ///
+    /// This checks the `SSH_CLIENT`, `SSH_TTY`, and `SSH_CONNECTION`
+    /// environment variables. Note that this can produce false positives
+    /// in containers, CI environments, or VS Code Remote sessions where
+    /// these variables may be inherited. Users can override the default
+    /// render mode with `--fullhd` if detection is wrong.
     pub fn detect() -> Self {
         if std::env::var("SSH_CLIENT").is_ok()
             || std::env::var("SSH_TTY").is_ok()

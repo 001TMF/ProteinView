@@ -5,6 +5,7 @@ use ratatui_image::picker::ProtocolType;
 use ratatui_image::{Image, Resize};
 
 use crate::app::{App, RenderMode};
+use crate::model::interface::Interaction;
 use crate::render::braille;
 use crate::render::framebuffer::framebuffer_to_braille_widget;
 use crate::render::hd;
@@ -12,6 +13,12 @@ use crate::render::kitty_png::KittyPngImage;
 
 /// Render the main 3D viewport
 pub fn render_viewport(frame: &mut Frame, area: Rect, app: &App) {
+    let interactions: &[Interaction] = if app.show_interface && app.show_interactions {
+        &app.interface_analysis.interactions
+    } else {
+        &[]
+    };
+
     match app.render_mode {
         RenderMode::Braille => {
             // Braille mode: 2x4 dots per cell, higher resolution but monochrome per cell
@@ -26,6 +33,7 @@ pub fn render_viewport(frame: &mut Frame, area: Rect, app: &App) {
                 width,
                 height,
                 app.show_ligands,
+                interactions,
             );
 
             frame.render_widget(canvas, area);
@@ -47,20 +55,21 @@ pub fn render_viewport(frame: &mut Frame, area: Rect, app: &App) {
                 height,
                 &app.mesh_cache,
                 app.show_ligands,
+                interactions,
             );
 
             let widget = framebuffer_to_braille_widget(&fb);
             frame.render_widget(widget, area);
         }
         RenderMode::FullHD => {
-            render_fullhd_viewport(frame, area, app);
+            render_fullhd_viewport(frame, area, app, interactions);
         }
     }
 }
 
 /// Render the FullHD viewport using graphics protocol (Sixel/Kitty/iTerm2) when
 /// available, falling back to colored braille characters otherwise.
-fn render_fullhd_viewport(frame: &mut Frame, area: Rect, app: &App) {
+fn render_fullhd_viewport(frame: &mut Frame, area: Rect, app: &App, interactions: &[Interaction]) {
     let proto = app.picker.protocol_type();
     let (font_w, font_h) = app.picker.font_size();
 
@@ -90,6 +99,7 @@ fn render_fullhd_viewport(frame: &mut Frame, area: Rect, app: &App) {
         px_h,
         &app.mesh_cache,
         app.show_ligands,
+        interactions,
     );
 
     // If the terminal supports a real graphics protocol, convert the

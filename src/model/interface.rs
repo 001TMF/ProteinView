@@ -13,7 +13,6 @@ pub enum InteractionType {
 
 /// A classified interaction between two atoms across a chain interface.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Interaction {
     pub interaction_type: InteractionType,
     pub atom_a: [f64; 3],
@@ -241,12 +240,13 @@ pub fn analyze_interface(protein: &Protein, cutoff: f64) -> InterfaceAnalysis {
                     }
 
                     if found_contact {
+                        let min_distance = min_d_sq.sqrt();
                         contacts.push(Contact {
                             chain_a: i,
                             residue_a: ri,
                             chain_b: j,
                             residue_b: rj,
-                            min_distance: min_d_sq.sqrt(),
+                            min_distance,
                         });
                         interface_residues.insert((i, ri));
                         interface_residues.insert((j, rj));

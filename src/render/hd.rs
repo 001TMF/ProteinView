@@ -1,4 +1,5 @@
 use crate::app::VizMode;
+use crate::model::interface::{Interaction, InteractionType};
 use crate::model::protein::{LigandType, MoleculeType, Protein};
 use crate::render::camera::Camera;
 use crate::render::color::{color_to_rgb, ColorScheme};
@@ -20,6 +21,7 @@ pub fn render_hd_framebuffer(
     height: f64,
     mesh: &[RibbonTriangle],
     show_ligands: bool,
+    interactions: &[Interaction],
 ) -> Framebuffer {
     let px_w = width as usize;
     let px_h = height as usize;
@@ -70,6 +72,11 @@ pub fn render_hd_framebuffer(
     // Render small molecules as ball-and-stick overlay
     if show_ligands {
         render_ligands_fb(&mut fb, protein, camera, color_scheme, half_w, half_h, ts);
+    }
+
+    // Render interaction lines (dashed) between interface atom pairs.
+    if !interactions.is_empty() {
+        render_interactions_fb(&mut fb, interactions, camera, half_w, half_h);
     }
 
     // Post-pass: blend all rasterized pixels toward a cool blue-gray fog color
@@ -282,5 +289,33 @@ fn render_ligands_fb(
                 }
             }
         }
+    }
+}
+
+/// Render non-covalent interaction lines as dashed segments in the framebuffer.
+fn render_interactions_fb(
+    fb: &mut Framebuffer,
+    interactions: &[Interaction],
+    camera: &Camera,
+    half_w: f64,
+    half_h: f64,
+) {
+    for interaction in interactions {
+        let p1 = camera.project(interaction.atom_a[0], interaction.atom_a[1], interaction.atom_a[2]);
+        let p2 = camera.project(interaction.atom_b[0], interaction.atom_b[1], interaction.atom_b[2]);
+        let px1 = to_pixel(p1.x, p1.y, p1.z, half_w, half_h);
+        let px2 = to_pixel(p2.x, p2.y, p2.z, half_w, half_h);
+        let color = interaction_color(interaction.interaction_type);
+        fb.draw_dashed_line_3d(px1, px2, color, 4.0, 3.0);
+    }
+}
+
+/// Map interaction type to an RGB color for rendering.
+fn interaction_color(t: InteractionType) -> [u8; 3] {
+    match t {
+        InteractionType::HydrogenBond => [0, 220, 255],       // cyan
+        InteractionType::SaltBridge => [255, 80, 80],          // red
+        InteractionType::HydrophobicContact => [220, 200, 60], // yellow
+        InteractionType::Other => [160, 160, 160],             // gray
     }
 }

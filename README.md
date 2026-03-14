@@ -34,15 +34,16 @@ Terminal molecular structure viewer -- load, rotate, and explore proteins, nucle
 
 ## Features
 
-- **Braille character rendering** -- high-resolution colored Unicode braille (2x4 dots per cell), works everywhere including SSH
-- **HD pixel rendering** -- Sixel/Kitty/iTerm2 graphics protocol support via ratatui-image for pixel-perfect display (`--hd`) with 24-bit depth-tinted shading
+- **3-tier render modes** -- Braille (text, works everywhere), HD (shaded braille with Lambert lighting), FullHD (Sixel/Kitty pixel graphics with PNG compression)
+- **SSH-aware rendering** -- auto-detects SSH connections; `--hd` defaults to fast text-based HD over SSH, FullHD locally. PNG-compressed Kitty protocol (~10-20x smaller than raw RGBA) makes FullHD viable even over SSH
 - **Cartoon ribbon visualization** -- smooth ribbon/tube rendering with depth fog and Lambert shading for helices, beta-sheets, and coils
 - **RNA/DNA structure support** -- backbone, wireframe, and cartoon modes with nucleotide base-type coloring (A=red, U/T=blue, G=green, C=yellow)
 - **Small molecule rendering** -- ligands displayed as ball-and-stick, ions as spheres; water molecules (HOH/WAT) automatically excluded
 - **3 visualization modes** -- Cartoon (ribbon), Backbone (CA trace / C4' trace), Wireframe (all-atom bonds)
-- **5 color schemes** -- secondary structure, chain, element, B-factor, rainbow
+- **7 color schemes** -- secondary structure, chain, element, B-factor, rainbow, pLDDT confidence (AlphaFold)
 - **Interactive rotation, zoom, pan** -- vim-style keybindings with auto-rotation
 - **Protein-protein interface analysis** -- detect and highlight inter-chain contacts with ligand binding pocket detection
+- **Interface interaction visualization** -- toggle dashed lines showing H-bonds, salt bridges, hydrophobic contacts, and other interactions color-coded by type
 - **NMR multi-model PDB handling** -- loads first model only for clean display
 - **PDB and mmCIF format support** -- including secondary structure parsing from both formats
 - **Fetch from RCSB PDB** -- download structures by ID with `--fetch` (optional feature)
@@ -66,8 +67,11 @@ This builds the binary and places it in `~/.cargo/bin/`, which is already on you
 # View a local PDB file
 proteinview examples/1UBQ.pdb
 
-# HD pixel mode (Sixel/Kitty/iTerm2 terminals)
+# HD mode (shaded braille -- fast over SSH)
 proteinview examples/4HHB.pdb --hd
+
+# FullHD pixel mode (Sixel/Kitty/iTerm2 -- PNG compressed)
+proteinview examples/4HHB.pdb --fullhd
 
 # Choose color scheme
 proteinview examples/1UBQ.pdb --color rainbow
@@ -75,29 +79,35 @@ proteinview examples/1UBQ.pdb --color rainbow
 # Choose visualization mode
 proteinview examples/4HHB.pdb --mode wireframe
 
+# Explicit render mode
+proteinview examples/1UBQ.pdb --render halfblock
+proteinview examples/1UBQ.pdb --render fullhd
+
 # Fetch from RCSB PDB (requires --features fetch)
 proteinview --fetch 1UBQ
 ```
 
 ## Keybindings
 
-| Key       | Action                     |
-|-----------|----------------------------|
-| `h` / `l` | Rotate Y-axis              |
-| `j` / `k` | Rotate X-axis              |
-| `u` / `i` | Rotate Z-axis (roll)       |
-| `+` / `-` | Zoom in / out              |
-| `w/a/s/d` | Pan                        |
-| `r`       | Reset view                 |
-| `c`       | Cycle color scheme         |
-| `v`       | Cycle visualization mode   |
-| `f`       | Toggle interface analysis  |
-| `m`       | Toggle braille / HD        |
-| `g`       | Toggle ligand visibility   |
-| `[` / `]` | Previous / next chain      |
-| `Space`   | Toggle auto-rotation       |
-| `?`       | Help overlay               |
-| `q`       | Quit                       |
+| Key       | Action                              |
+|-----------|-------------------------------------|
+| `h` / `l` | Rotate Y-axis                      |
+| `j` / `k` | Rotate X-axis                      |
+| `u` / `i` | Rotate Z-axis (roll)               |
+| `+` / `-` | Zoom in / out                      |
+| `w/a/s/d` | Pan                                |
+| `r`       | Reset view                          |
+| `c`       | Cycle color scheme                  |
+| `v`       | Cycle visualization mode            |
+| `m`       | Toggle Braille / HD                 |
+| `M`       | Toggle HD / FullHD (Sixel/Kitty)    |
+| `f`       | Toggle interface analysis           |
+| `I`       | Toggle interface interactions       |
+| `g`       | Toggle ligand visibility            |
+| `[` / `]` | Previous / next chain              |
+| `Space`   | Toggle auto-rotation                |
+| `?`       | Help overlay                        |
+| `q`       | Quit                                |
 
 ## Visualization Modes
 
@@ -133,15 +143,16 @@ proteinview --fetch 1UBQ
 
 ### Interface Analysis
 
-Press `f` to toggle the protein-protein interface panel, which detects inter-chain contacts, highlights interface residues, and identifies ligand binding pockets with their coordinating residues.
+Press `f` to toggle the protein-protein interface panel, which detects inter-chain contacts, highlights interface residues, and identifies ligand binding pockets with their coordinating residues. Press `I` (Shift+I) to overlay dashed interaction lines color-coded by type: cyan (H-bonds), red (salt bridges), yellow (hydrophobic contacts), gray (other).
 
 ![Interface analysis panel showing chain contacts](assets/interface-cartoon-1zvh.png)
 
 ## Terminal Support
 
-- Works in any terminal with Unicode support (braille mode).
-- For best quality, use a terminal with Sixel or Kitty graphics protocol support (e.g., WezTerm, Kitty, foot, iTerm2) and pass `--hd`.
-- The `--hd` flag auto-detects the best graphics protocol; falls back to colored braille if none available.
+- **Braille** -- works in any terminal with Unicode support, including over SSH and inside tmux/screen.
+- **HD** (`--hd`) -- shaded braille with Lambert lighting and depth fog. Fast everywhere including SSH.
+- **FullHD** (`--fullhd`) -- Sixel/Kitty/iTerm2 pixel graphics. Best quality. Over SSH, uses PNG compression (~10-20x smaller) for responsive performance.
+- `--hd` is SSH-aware: defaults to HD (text) over SSH, FullHD locally. Use `--fullhd` to force pixel graphics regardless of connection.
 
 ## Building
 

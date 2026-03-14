@@ -2,6 +2,25 @@ use std::collections::HashSet;
 
 use crate::model::protein::Protein;
 
+/// Classification of inter-residue interactions at a chain interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractionType {
+    HydrogenBond,
+    SaltBridge,
+    HydrophobicContact,
+    Other,
+}
+
+/// A classified interaction between two atoms across a chain interface.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct Interaction {
+    pub interaction_type: InteractionType,
+    pub atom_a: [f64; 3],
+    pub atom_b: [f64; 3],
+    pub distance: f64,
+}
+
 /// A contact between two residues on different chains.
 #[derive(Debug, Clone)]
 pub struct Contact {
@@ -46,6 +65,8 @@ pub struct InterfaceAnalysis {
     /// Total number of unique interface residues across all chains.
     pub total_interface_residues: usize,
     pub binding_pockets: Option<BindingPocketAnalysis>,
+    /// Classified atom-atom interactions across chain interfaces.
+    pub interactions: Vec<Interaction>,
 }
 
 /// Squared Euclidean distance between two atoms.
@@ -55,6 +76,123 @@ fn dist_sq(ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64) -> f64 {
     let dy = ay - by;
     let dz = az - bz;
     dx * dx + dy * dy + dz * dz
+}
+
+/// Returns true if the atom on a positively-charged residue side-chain
+/// carries formal positive charge (ARG NH*/NE, LYS NZ).
+fn is_charged_positive(res_name: &str, atom_name: &str) -> bool {
+    match res_name {
+        "ARG" => atom_name.starts_with("NH") || atom_name == "NE",
+        "LYS" => atom_name == "NZ",
+        _ => false,
+    }
+}
+
+/// Returns true if the atom on a negatively-charged residue side-chain
+/// carries formal negative charge (ASP OD*, GLU OE*).
+fn is_charged_negative(res_name: &str, atom_name: &str) -> bool {
+    match res_name {
+        "ASP" => atom_name.starts_with("OD"),
+        "GLU" => atom_name.starts_with("OE"),
+        _ => false,
+    }
+}
+
+/// Returns true if the residue is typically hydrophobic.
+fn is_hydrophobic_residue(name: &str) -> bool {
+    matches!(name, "ALA" | "VAL" | "LEU" | "ILE" | "PHE" | "TRP" | "MET" | "PRO")
+}
+
+/// Classify inter-chain interactions from the given contacts.
+///
+/// For each Contact the function finds the closest heavy-atom pair between
+/// the two residues and classifies the interaction by distance and chemistry:
+///   - **H-bond**: N/O donor to N/O/S acceptor, distance <= 3.5 A
+///   - **Salt bridge**: charged N to charged O (or vice-versa), distance <= 4.0 A
+///   - **Hydrophobic contact**: C-C on hydrophobic residues, distance <= 4.5 A
+///   - **Other**: anything not matching the above
+fn classify_interactions(protein: &Protein, contacts: &[Contact]) -> Vec<Interaction> {
+    let mut interactions = Vec::with_capacity(contacts.len());
+
+    for contact in contacts {
+        let res_a = &protein.chains[contact.chain_a].residues[contact.residue_a];
+        let res_b = &protein.chains[contact.chain_b].residues[contact.residue_b];
+
+        // Find the closest heavy-atom pair.
+        let mut best_dist_sq = f64::MAX;
+        let mut best_a: Option<&crate::model::protein::Atom> = None;
+        let mut best_b: Option<&crate::model::protein::Atom> = None;
+
+        for atom_a in &res_a.atoms {
+            if atom_a.element == "H" {
+                continue;
+            }
+            for atom_b in &res_b.atoms {
+                if atom_b.element == "H" {
+                    continue;
+                }
+                let d_sq = dist_sq(atom_a.x, atom_a.y, atom_a.z, atom_b.x, atom_b.y, atom_b.z);
+                if d_sq < best_dist_sq {
+                    best_dist_sq = d_sq;
+                    best_a = Some(atom_a);
+                    best_b = Some(atom_b);
+                }
+            }
+        }
+
+        let (atom_a, atom_b) = match (best_a, best_b) {
+            (Some(a), Some(b)) => (a, b),
+            _ => continue,
+        };
+
+        let distance = best_dist_sq.sqrt();
+
+        // Classify
+        let interaction_type = if distance <= 4.0
+            && ((is_charged_positive(&res_a.name, &atom_a.name)
+                && is_charged_negative(&res_b.name, &atom_b.name))
+                || (is_charged_negative(&res_a.name, &atom_a.name)
+                    && is_charged_positive(&res_b.name, &atom_b.name)))
+        {
+            InteractionType::SaltBridge
+        } else if distance <= 3.5 {
+            let el_a = atom_a.element.as_str();
+            let el_b = atom_b.element.as_str();
+            let donor_acceptor = matches!(el_a, "N" | "O")
+                && matches!(el_b, "N" | "O" | "S");
+            let acceptor_donor = matches!(el_b, "N" | "O")
+                && matches!(el_a, "N" | "O" | "S");
+            if donor_acceptor || acceptor_donor {
+                InteractionType::HydrogenBond
+            } else if el_a == "C"
+                && el_b == "C"
+                && is_hydrophobic_residue(&res_a.name)
+                && is_hydrophobic_residue(&res_b.name)
+            {
+                InteractionType::HydrophobicContact
+            } else {
+                InteractionType::Other
+            }
+        } else if distance <= 4.5
+            && atom_a.element == "C"
+            && atom_b.element == "C"
+            && is_hydrophobic_residue(&res_a.name)
+            && is_hydrophobic_residue(&res_b.name)
+        {
+            InteractionType::HydrophobicContact
+        } else {
+            InteractionType::Other
+        };
+
+        interactions.push(Interaction {
+            interaction_type,
+            atom_a: [atom_a.x, atom_a.y, atom_a.z],
+            atom_b: [atom_b.x, atom_b.y, atom_b.z],
+            distance,
+        });
+    }
+
+    interactions
 }
 
 /// Analyze the interface between all chain pairs in a protein.
@@ -129,12 +267,15 @@ pub fn analyze_interface(protein: &Protein, cutoff: f64) -> InterfaceAnalysis {
 
     let total_interface_residues = interface_residues.len();
 
+    let interactions = classify_interactions(protein, &contacts);
+
     InterfaceAnalysis {
         contacts,
         interface_residues,
         chain_interface_counts,
         total_interface_residues,
         binding_pockets: None,
+        interactions,
     }
 }
 
@@ -179,6 +320,23 @@ pub fn analyze_binding_pockets(protein: &Protein, cutoff: f64) -> BindingPocketA
 }
 
 impl InterfaceAnalysis {
+    /// Return counts of each interaction type: (hbonds, salt_bridges, hydrophobic, other).
+    pub fn interaction_counts(&self) -> (usize, usize, usize, usize) {
+        let mut hbonds = 0;
+        let mut salt_bridges = 0;
+        let mut hydrophobic = 0;
+        let mut other = 0;
+        for interaction in &self.interactions {
+            match interaction.interaction_type {
+                InteractionType::HydrogenBond => hbonds += 1,
+                InteractionType::SaltBridge => salt_bridges += 1,
+                InteractionType::HydrophobicContact => hydrophobic += 1,
+                InteractionType::Other => other += 1,
+            }
+        }
+        (hbonds, salt_bridges, hydrophobic, other)
+    }
+
     /// Convert interface residues to (chain_id, seq_num) pairs using the protein.
     pub fn interface_residues_by_id_with_protein(&self, protein: &Protein) -> HashSet<(String, i32)> {
         let mut set = HashSet::new();

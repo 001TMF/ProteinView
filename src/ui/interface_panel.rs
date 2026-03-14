@@ -120,22 +120,22 @@ pub fn render_interface_panel(
         )));
         lines.push(Line::from(vec![
             Span::styled(" ", Style::default()),
-            Span::styled("\u{2588}", Style::default().fg(Color::Rgb(0, 180, 255))),
+            Span::styled("\u{2588}", Style::default().fg(Color::Rgb(0, 220, 255))),
             Span::styled(format!(" H-bond: {}", hbonds), Style::default().fg(Color::White)),
         ]));
         lines.push(Line::from(vec![
             Span::styled(" ", Style::default()),
-            Span::styled("\u{2588}", Style::default().fg(Color::Rgb(255, 60, 60))),
+            Span::styled("\u{2588}", Style::default().fg(Color::Rgb(255, 80, 80))),
             Span::styled(format!(" Salt bridge: {}", salt_bridges), Style::default().fg(Color::White)),
         ]));
         lines.push(Line::from(vec![
             Span::styled(" ", Style::default()),
-            Span::styled("\u{2588}", Style::default().fg(Color::Rgb(255, 220, 50))),
+            Span::styled("\u{2588}", Style::default().fg(Color::Rgb(220, 200, 60))),
             Span::styled(format!(" Hydrophobic: {}", hydrophobic), Style::default().fg(Color::White)),
         ]));
         lines.push(Line::from(vec![
             Span::styled(" ", Style::default()),
-            Span::styled("\u{2588}", Style::default().fg(Color::Rgb(180, 180, 180))),
+            Span::styled("\u{2588}", Style::default().fg(Color::Rgb(160, 160, 160))),
             Span::styled(format!(" Other: {}", other), Style::default().fg(Color::White)),
         ]));
     } else {

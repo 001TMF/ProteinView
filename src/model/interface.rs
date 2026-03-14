@@ -17,6 +17,9 @@ pub struct Interaction {
     pub interaction_type: InteractionType,
     pub atom_a: [f64; 3],
     pub atom_b: [f64; 3],
+    /// Distance in angstroms between the two atoms. Stored for future
+    /// display in tooltips or filtering by distance threshold.
+    #[allow(dead_code)]
     pub distance: f64,
 }
 

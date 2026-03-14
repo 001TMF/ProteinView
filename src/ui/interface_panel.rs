@@ -14,6 +14,8 @@ pub fn render_interface_panel(
     summary_lines: &[String],
     focus_chain: usize,
     chain_names: &[String],
+    show_interactions: bool,
+    interaction_counts: (usize, usize, usize, usize),
 ) {
     let mut lines: Vec<Line> = Vec::new();
 
@@ -106,6 +108,41 @@ pub fn render_interface_panel(
             Span::styled("\u{2588}", Style::default().fg(Color::Rgb(0, 255, 255))),
             Span::styled(" Ion", Style::default().fg(Color::DarkGray)),
         ]));
+    }
+
+    // Interaction section
+    lines.push(Line::from(""));
+    if show_interactions {
+        let (hbonds, salt_bridges, hydrophobic, other) = interaction_counts;
+        lines.push(Line::from(Span::styled(
+            " Interactions",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled("\u{2588}", Style::default().fg(Color::Rgb(0, 220, 255))),
+            Span::styled(format!(" H-bond: {}", hbonds), Style::default().fg(Color::White)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled("\u{2588}", Style::default().fg(Color::Rgb(255, 80, 80))),
+            Span::styled(format!(" Salt bridge: {}", salt_bridges), Style::default().fg(Color::White)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled("\u{2588}", Style::default().fg(Color::Rgb(220, 200, 60))),
+            Span::styled(format!(" Hydrophobic: {}", hydrophobic), Style::default().fg(Color::White)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled("\u{2588}", Style::default().fg(Color::Rgb(160, 160, 160))),
+            Span::styled(format!(" Other: {}", other), Style::default().fg(Color::White)),
+        ]));
+    } else {
+        lines.push(Line::from(Span::styled(
+            " [Shift+I]: show interactions",
+            Style::default().fg(Color::DarkGray),
+        )));
     }
 
     let panel = Paragraph::new(lines)

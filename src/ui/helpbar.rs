@@ -22,6 +22,8 @@ pub fn render_helpbar(frame: &mut Frame, area: Rect) {
         Span::styled(": mode  ", Style::default().fg(Color::Gray)),
         Span::styled("f", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::styled(": interface  ", Style::default().fg(Color::Gray)),
+        Span::styled("I", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(": interactions  ", Style::default().fg(Color::Gray)),
         Span::styled("?", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::styled(": help  ", Style::default().fg(Color::Gray)),
         Span::styled("g", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),

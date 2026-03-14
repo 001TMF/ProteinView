@@ -92,6 +92,7 @@ pub struct App {
     pub show_help: bool,
     pub show_ligands: bool,
     pub show_interface: bool,
+    pub show_interactions: bool,
     pub interface_analysis: InterfaceAnalysis,
     pub should_quit: bool,
     /// Whether the B-factor column likely contains pLDDT confidence scores.
@@ -187,6 +188,7 @@ impl App {
             show_help: false,
             show_ligands: true,
             show_interface: false,
+            show_interactions: false,
             interface_analysis,
             should_quit: false,
             has_plddt,
@@ -225,11 +227,18 @@ impl App {
         if self.show_interface {
             self.rebuild_interface_colors();
         } else {
+            self.show_interactions = false;
             self.color_scheme = ColorScheme::new(
                 ColorSchemeType::Structure,
                 self.protein.residue_count(),
             );
             self.mesh_dirty = true;
+        }
+    }
+
+    pub fn toggle_interactions(&mut self) {
+        if self.show_interface {
+            self.show_interactions = !self.show_interactions;
         }
     }
 

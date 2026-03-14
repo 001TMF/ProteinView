@@ -223,6 +223,7 @@ fn main() -> Result<()> {
                 KeyCode::Char(']') => app.next_chain(),
                 KeyCode::Char(' ') => app.camera.auto_rotate = !app.camera.auto_rotate,
                 KeyCode::Char('f') => app.toggle_interface(),
+                KeyCode::Char('I') => app.toggle_interactions(),
                 KeyCode::Char('g') => app.toggle_ligands(),
                 KeyCode::Char('?') => app.show_help = !app.show_help,
                 KeyCode::Esc => { if app.show_help { app.show_help = false; } },
@@ -286,12 +287,15 @@ fn main() -> Result<()> {
 
                 let summary = app.interface_analysis.summary(&app.protein);
                 let chain_names = app.chain_names();
+                let interaction_counts = app.interface_analysis.interaction_counts();
                 ui::interface_panel::render_interface_panel(
                     frame,
                     horiz[0],
                     &summary,
                     app.current_chain,
                     &chain_names,
+                    app.show_interactions,
+                    interaction_counts,
                 );
                 horiz[1]
             } else {

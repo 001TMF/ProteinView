@@ -2,6 +2,7 @@ use ratatui::symbols::Marker;
 use ratatui::widgets::canvas::{Canvas, Context, Line};
 
 use crate::app::VizMode;
+use crate::model::interface::{Interaction, InteractionType};
 use crate::model::protein::{LigandType, MoleculeType, Protein};
 use crate::render::camera::Camera;
 use crate::render::color::ColorScheme;
@@ -66,6 +67,7 @@ pub fn render_protein<'a>(
     width: f64,
     height: f64,
     show_ligands: bool,
+    interactions: &'a [Interaction],
 ) -> Canvas<'a, impl Fn(&mut Context<'_>) + 'a> {
     Canvas::default()
         .marker(Marker::Braille)
@@ -83,6 +85,10 @@ pub fn render_protein<'a>(
 
             if show_ligands {
                 render_ligands(ctx, protein, camera, color_scheme);
+            }
+
+            if !interactions.is_empty() {
+                render_interactions(ctx, interactions, camera);
             }
         })
 }
@@ -223,5 +229,38 @@ fn render_ligands(
                 }
             }
         }
+    }
+}
+
+/// Map interaction type to a ratatui color for braille rendering.
+fn braille_interaction_color(t: InteractionType) -> ratatui::style::Color {
+    match t {
+        InteractionType::HydrogenBond => ratatui::style::Color::Rgb(0, 220, 255),       // cyan
+        InteractionType::SaltBridge => ratatui::style::Color::Rgb(255, 80, 80),          // red
+        InteractionType::HydrophobicContact => ratatui::style::Color::Rgb(220, 200, 60), // yellow
+        InteractionType::Other => ratatui::style::Color::Rgb(160, 160, 160),             // gray
+    }
+}
+
+/// Render non-covalent interaction lines in braille mode.
+///
+/// Uses solid lines (not dashed) because braille resolution is too low for
+/// dashes to be visually meaningful.
+fn render_interactions(
+    ctx: &mut Context<'_>,
+    interactions: &[Interaction],
+    camera: &Camera,
+) {
+    for interaction in interactions {
+        let p1 = camera.project(interaction.atom_a[0], interaction.atom_a[1], interaction.atom_a[2]);
+        let p2 = camera.project(interaction.atom_b[0], interaction.atom_b[1], interaction.atom_b[2]);
+        let color = braille_interaction_color(interaction.interaction_type);
+        ctx.draw(&Line {
+            x1: p1.x,
+            y1: p1.y,
+            x2: p2.x,
+            y2: p2.y,
+            color,
+        });
     }
 }

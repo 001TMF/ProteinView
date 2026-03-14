@@ -266,6 +266,102 @@ impl Framebuffer {
         }
     }
 
+    /// Draw a 3D dashed line with z-interpolation.
+    ///
+    /// Like [`draw_line_3d`] but alternates between drawing (`dash_len` pixels)
+    /// and skipping (`gap_len` pixels) based on accumulated pixel distance
+    /// along the line.  Z-interpolation is maintained throughout so that the
+    /// dashed segments interact correctly with the z-buffer.
+    pub fn draw_dashed_line_3d(
+        &mut self,
+        p1: [f64; 3],
+        p2: [f64; 3],
+        color: [u8; 3],
+        dash_len: f64,
+        gap_len: f64,
+    ) {
+        // Guard: if cycle is zero, non-finite, or either length is negative,
+        // fall back to a solid line to avoid NaN from `accumulated % 0.0`.
+        let cycle = dash_len + gap_len;
+        if cycle <= 0.0 || !cycle.is_finite() || dash_len < 0.0 || gap_len < 0.0 {
+            self.draw_line_3d(p1, p2, color);
+            return;
+        }
+
+        let mut x0 = p1[0].round() as isize;
+        let mut y0 = p1[1].round() as isize;
+        let x1 = p2[0].round() as isize;
+        let y1 = p2[1].round() as isize;
+
+        // Skip lines where both endpoints are entirely off the same side.
+        let w = self.width as isize;
+        let h = self.height as isize;
+        if (x0 < 0 && x1 < 0) || (x0 >= w && x1 >= w)
+            || (y0 < 0 && y1 < 0) || (y0 >= h && y1 >= h)
+        {
+            return;
+        }
+
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let sx: isize = if x0 < x1 { 1 } else { -1 };
+        let sy: isize = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+
+        // Total Manhattan-ish distance for z interpolation.
+        let total_steps = dx.max(-dy) as f64;
+
+        let mut accumulated: f64 = 0.0;
+        let mut prev_x = x0;
+        let mut prev_y = y0;
+
+        loop {
+            // Compute interpolation parameter t for z.
+            let t = if total_steps > 0.0 {
+                let from_start_x = (x0 - p1[0].round() as isize).unsigned_abs() as f64;
+                let from_start_y = (y0 - p1[1].round() as isize).unsigned_abs() as f64;
+                from_start_x.max(from_start_y) / total_steps
+            } else {
+                0.0
+            };
+            let z = p1[2] * (1.0 - t) + p2[2] * t;
+
+            // Accumulate Euclidean distance from previous pixel.
+            let step_dx = (x0 - prev_x) as f64;
+            let step_dy = (y0 - prev_y) as f64;
+            accumulated += (step_dx * step_dx + step_dy * step_dy).sqrt();
+            prev_x = x0;
+            prev_y = y0;
+
+            // Determine if we are in a dash or gap segment.
+            let phase = accumulated % cycle;
+            let drawing = phase < dash_len;
+
+            if drawing
+                && x0 >= 0
+                && y0 >= 0
+                && (x0 as usize) < self.width
+                && (y0 as usize) < self.height
+            {
+                self.set_pixel(x0 as usize, y0 as usize, z, color);
+            }
+
+            if x0 == x1 && y0 == y1 {
+                break;
+            }
+
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x0 += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y0 += sy;
+            }
+        }
+    }
+
     /// Draw a 3D line with the given pixel thickness.
     ///
     /// For each pixel along the main Bresenham line, a filled circle of the
@@ -890,5 +986,93 @@ mod tests {
         // Background pixels must remain [0,0,0]
         assert_eq!(fb.color[2], [0, 0, 0], "background pixel at index 2 should stay black");
         assert_eq!(fb.color[3], [0, 0, 0], "background pixel at index 3 should stay black");
+    }
+
+    #[test]
+    fn test_draw_dashed_line_3d_has_gaps() {
+        let mut fb = Framebuffer::new(20, 1);
+        // Horizontal dashed line across the entire width: dash=3, gap=3
+        fb.draw_dashed_line_3d([0.0, 0.0, 1.0], [19.0, 0.0, 2.0], [255, 255, 255], 3.0, 3.0);
+
+        // Count drawn (non-black) and gap (black) pixels.
+        let drawn: usize = fb.color[..20].iter().filter(|c| **c != [0, 0, 0]).count();
+        let gap: usize = fb.color[..20].iter().filter(|c| **c == [0, 0, 0]).count();
+
+        // There should be both drawn and gap pixels (not all drawn, not all gap).
+        assert!(drawn > 0, "dashed line should draw some pixels");
+        assert!(gap > 0, "dashed line should leave some gaps");
+    }
+
+    #[test]
+    fn test_draw_dashed_line_3d_z_interpolation() {
+        let mut fb = Framebuffer::new(10, 1);
+        fb.draw_dashed_line_3d([0.0, 0.0, 1.0], [9.0, 0.0, 10.0], [255, 255, 255], 100.0, 0.0);
+
+        // With dash_len >> line length, all pixels should be drawn.
+        // Check z interpolation: first pixel should be near 1.0, last near 10.0.
+        assert!((fb.depth[0] - 1.0).abs() < 0.5, "start depth should be near 1.0, got {}", fb.depth[0]);
+        assert!((fb.depth[9] - 10.0).abs() < 0.5, "end depth should be near 10.0, got {}", fb.depth[9]);
+    }
+
+    #[test]
+    fn test_draw_dashed_line_3d_respects_zbuffer() {
+        let mut fb = Framebuffer::new(10, 1);
+        // Draw a solid foreground line at z=1
+        fb.draw_line_3d([0.0, 0.0, 1.0], [9.0, 0.0, 1.0], [255, 0, 0]);
+        // Draw a dashed background line at z=5 (farther) — should not overwrite
+        fb.draw_dashed_line_3d([0.0, 0.0, 5.0], [9.0, 0.0, 5.0], [0, 255, 0], 100.0, 0.0);
+
+        // All pixels should remain red (closer z wins)
+        for i in 0..10 {
+            assert_eq!(fb.color[i], [255, 0, 0], "pixel {} should stay red (z-buffer)", i);
+        }
+    }
+
+    #[test]
+    fn test_draw_dashed_line_3d_diagonal() {
+        let mut fb = Framebuffer::new(10, 10);
+        fb.draw_dashed_line_3d([0.0, 0.0, 1.0], [9.0, 9.0, 2.0], [128, 128, 128], 2.0, 2.0);
+
+        // At least the first pixel should be drawn (start of first dash).
+        assert_ne!(fb.color[0], [0, 0, 0], "first pixel of diagonal dashed line should be drawn");
+
+        // Count total drawn pixels — should be roughly half of the diagonal length.
+        let total_drawn: usize = fb.color.iter().filter(|c| **c != [0, 0, 0]).count();
+        assert!(total_drawn > 0 && total_drawn < 14, "diagonal should have partial coverage, got {}", total_drawn);
+    }
+
+    #[test]
+    fn test_draw_dashed_line_3d_offscreen_clipped() {
+        let mut fb = Framebuffer::new(10, 10);
+        // Both endpoints off the same side — should be silently skipped.
+        fb.draw_dashed_line_3d([-5.0, -5.0, 1.0], [-1.0, -1.0, 1.0], [255, 255, 255], 2.0, 1.0);
+        let drawn: usize = fb.color.iter().filter(|c| **c != [0, 0, 0]).count();
+        assert_eq!(drawn, 0, "fully off-screen dashed line should draw nothing");
+    }
+
+    #[test]
+    fn test_draw_dashed_line_3d_zero_cycle_falls_back_to_solid() {
+        let mut fb = Framebuffer::new(20, 1);
+        // dash_len=0, gap_len=0 => cycle=0, which would produce NaN via `% 0.0`.
+        // The guard should fall back to a solid line instead.
+        fb.draw_dashed_line_3d([0.0, 0.0, 1.0], [19.0, 0.0, 2.0], [255, 255, 255], 0.0, 0.0);
+
+        // Every pixel along the horizontal line should be drawn (solid fallback).
+        let drawn: usize = fb.color[..20].iter().filter(|c| **c != [0, 0, 0]).count();
+        assert_eq!(drawn, 20, "zero-cycle dashed line should draw solid (got {} pixels)", drawn);
+
+        // Also verify z-interpolation is intact: endpoints should have expected depths.
+        assert!((fb.depth[0] - 1.0).abs() < 0.5, "start depth should be near 1.0");
+        assert!((fb.depth[19] - 2.0).abs() < 0.5, "end depth should be near 2.0");
+    }
+
+    #[test]
+    fn test_draw_dashed_line_3d_negative_args_falls_back_to_solid() {
+        let mut fb = Framebuffer::new(10, 1);
+        // Negative dash_len should trigger the guard and draw a solid line.
+        fb.draw_dashed_line_3d([0.0, 0.0, 1.0], [9.0, 0.0, 1.0], [200, 100, 50], -1.0, 3.0);
+
+        let drawn: usize = fb.color[..10].iter().filter(|c| **c != [0, 0, 0]).count();
+        assert_eq!(drawn, 10, "negative dash_len should draw solid (got {} pixels)", drawn);
     }
 }

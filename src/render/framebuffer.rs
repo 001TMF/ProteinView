@@ -280,6 +280,14 @@ impl Framebuffer {
         dash_len: f64,
         gap_len: f64,
     ) {
+        // Guard: if cycle is zero, non-finite, or either length is negative,
+        // fall back to a solid line to avoid NaN from `accumulated % 0.0`.
+        let cycle = dash_len + gap_len;
+        if cycle <= 0.0 || !cycle.is_finite() || dash_len < 0.0 || gap_len < 0.0 {
+            self.draw_line_3d(p1, p2, color);
+            return;
+        }
+
         let mut x0 = p1[0].round() as isize;
         let mut y0 = p1[1].round() as isize;
         let x1 = p2[0].round() as isize;
@@ -303,7 +311,6 @@ impl Framebuffer {
         // Total Manhattan-ish distance for z interpolation.
         let total_steps = dx.max(-dy) as f64;
 
-        let cycle = dash_len + gap_len;
         let mut accumulated: f64 = 0.0;
         let mut prev_x = x0;
         let mut prev_y = y0;
@@ -1041,5 +1048,31 @@ mod tests {
         fb.draw_dashed_line_3d([-5.0, -5.0, 1.0], [-1.0, -1.0, 1.0], [255, 255, 255], 2.0, 1.0);
         let drawn: usize = fb.color.iter().filter(|c| **c != [0, 0, 0]).count();
         assert_eq!(drawn, 0, "fully off-screen dashed line should draw nothing");
+    }
+
+    #[test]
+    fn test_draw_dashed_line_3d_zero_cycle_falls_back_to_solid() {
+        let mut fb = Framebuffer::new(20, 1);
+        // dash_len=0, gap_len=0 => cycle=0, which would produce NaN via `% 0.0`.
+        // The guard should fall back to a solid line instead.
+        fb.draw_dashed_line_3d([0.0, 0.0, 1.0], [19.0, 0.0, 2.0], [255, 255, 255], 0.0, 0.0);
+
+        // Every pixel along the horizontal line should be drawn (solid fallback).
+        let drawn: usize = fb.color[..20].iter().filter(|c| **c != [0, 0, 0]).count();
+        assert_eq!(drawn, 20, "zero-cycle dashed line should draw solid (got {} pixels)", drawn);
+
+        // Also verify z-interpolation is intact: endpoints should have expected depths.
+        assert!((fb.depth[0] - 1.0).abs() < 0.5, "start depth should be near 1.0");
+        assert!((fb.depth[19] - 2.0).abs() < 0.5, "end depth should be near 2.0");
+    }
+
+    #[test]
+    fn test_draw_dashed_line_3d_negative_args_falls_back_to_solid() {
+        let mut fb = Framebuffer::new(10, 1);
+        // Negative dash_len should trigger the guard and draw a solid line.
+        fb.draw_dashed_line_3d([0.0, 0.0, 1.0], [9.0, 0.0, 1.0], [200, 100, 50], -1.0, 3.0);
+
+        let drawn: usize = fb.color[..10].iter().filter(|c| **c != [0, 0, 0]).count();
+        assert_eq!(drawn, 10, "negative dash_len should draw solid (got {} pixels)", drawn);
     }
 }

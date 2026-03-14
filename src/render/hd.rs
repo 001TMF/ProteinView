@@ -74,15 +74,15 @@ pub fn render_hd_framebuffer(
         render_ligands_fb(&mut fb, protein, camera, color_scheme, half_w, half_h, ts);
     }
 
-    // Render interaction lines (dashed) between interface atom pairs.
-    if !interactions.is_empty() {
-        render_interactions_fb(&mut fb, interactions, camera, half_w, half_h);
-    }
-
     // Post-pass: blend all rasterized pixels toward a cool blue-gray fog color
     // based on their z-buffer depth.  This gives uniform depth cues across all
     // rendering modes (triangles, lines, circles).
     fb.apply_depth_tint([40, 50, 70], 0.35);
+
+    // Render interaction lines AFTER depth tint so their color coding stays vivid.
+    if !interactions.is_empty() {
+        render_interactions_fb(&mut fb, interactions, camera, half_w, half_h);
+    }
 
     fb
 }

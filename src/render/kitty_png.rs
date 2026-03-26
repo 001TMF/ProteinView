@@ -1,9 +1,15 @@
-//! Compressed Kitty graphics protocol transmitter using PNG encoding.
+//! Compressed Kitty graphics protocol transmitter using raw RGBA + zlib.
 //!
 //! ratatui-image sends Kitty images as raw RGBA32 base64-encoded (`f=32`),
-//! which is ~1.3MB per frame for a 640x384 render.  This module replaces
-//! that path with PNG encoding (`f=100`) which compresses protein renders
-//! (mostly black/transparent background) to roughly 5-15% of raw size.
+//! which is ~1.3MB per frame for a 640x384 render.  This module compresses
+//! the raw RGBA pixel data with zlib (level 1 / fastest) and sends it via
+//! the Kitty graphics protocol with `f=32,o=z`.  This avoids PNG's
+//! filtering, CRC checksums, and chunk framing overhead while still
+//! achieving good compression on protein renders (mostly black/transparent
+//! background).
+//!
+//! Note: the file is still named `kitty_png.rs` for historical reasons and
+//! to minimize import churn.  The actual encoding is raw RGBA + zlib, not PNG.
 //!
 //! Unlike the original implementation which dumped the escape sequence into
 //! cell (0,0) and skipped everything else, this version uses Kitty's
@@ -19,21 +25,27 @@
 //! during normal rendering; cleanup is done only when leaving FullHD mode.
 
 use std::fmt::Write;
-use std::io::Cursor;
+use std::io::Write as IoWrite;
 
 use base64::Engine;
+use flate2::Compression;
+use flate2::write::ZlibEncoder;
 use image::DynamicImage;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 
-/// Fixed image ID used for all Kitty PNG transmissions.  By reusing the
+/// Fixed image ID used for all Kitty image transmissions.  By reusing the
 /// same ID every frame with `a=T,U=1`, Kitty atomically replaces the old
 /// image data — no flicker, no delete-before-draw gap.
 const IMAGE_ID: u32 = 1;
 
 /// A ratatui `Widget` that renders a `DynamicImage` via the Kitty graphics
-/// protocol using PNG compression (`f=100`) and unicode placeholders.
+/// protocol using raw RGBA data with zlib compression (`f=32,o=z`) and
+/// unicode placeholders.
+///
+/// Named `KittyPngImage` for historical reasons; the actual encoding is
+/// zlib-compressed raw RGBA, not PNG.
 pub struct KittyPngImage {
     transmit: String,
     unique_id: u32,
@@ -53,9 +65,10 @@ impl KittyPngImage {
 
     /// Create a new compressed Kitty image widget.
     ///
-    /// The image is immediately PNG-encoded and base64-chunked into the
-    /// Kitty escape sequence.  Call this outside the draw closure if you
-    /// want to time encoding separately.
+    /// The image is immediately converted to raw RGBA, zlib-compressed
+    /// (level 1 / fastest), and base64-chunked into the Kitty escape
+    /// sequence.  Call this outside the draw closure if you want to time
+    /// encoding separately.
     ///
     /// Uses a single fixed image ID (`IMAGE_ID`).  Transmitting with
     /// `a=T,U=1` for the same ID causes Kitty to atomically replace the
@@ -64,18 +77,23 @@ impl KittyPngImage {
     pub fn new(img: &DynamicImage, area: Rect) -> Option<Self> {
         let (w, h) = (img.width(), img.height());
 
-        // Encode as PNG.  Returns None on failure so the caller can fall
-        // back to braille instead of crashing the TUI.
-        let mut png_bytes: Vec<u8> = Vec::new();
-        if img
-            .write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)
-            .is_err()
-        {
+        // Get raw RGBA bytes from the image.
+        let rgba = img.to_rgba8();
+        let raw_bytes = rgba.as_raw();
+
+        // Compress with zlib level 1 (fastest).  Returns None on failure so
+        // the caller can fall back to braille instead of crashing the TUI.
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+        if encoder.write_all(raw_bytes).is_err() {
             return None;
         }
+        let compressed = match encoder.finish() {
+            Ok(bytes) => bytes,
+            Err(_) => return None,
+        };
 
         // Base64.
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&compressed);
 
         // Build Kitty escape, chunked to <=4096 base64 chars.
         // U=1 enables virtual placement via unicode placeholders.
@@ -92,11 +110,11 @@ impl KittyPngImage {
         for (i, chunk) in chunks.iter().enumerate() {
             write!(transmit, "\x1b_Gq=2,").unwrap();
             if i == 0 {
-                // a=T = transmit+display, f=100 = PNG, t=d = direct (inline)
-                // U=1 = use unicode placeholders for positioning
+                // a=T = transmit+display, f=32 = raw RGBA, o=z = zlib compression
+                // t=d = direct (inline), U=1 = use unicode placeholders
                 // Reusing IMAGE_ID causes Kitty to atomically replace the
                 // previous image — no delete needed, no flicker.
-                write!(transmit, "i={IMAGE_ID},a=T,U=1,f=100,t=d,s={w},v={h},").unwrap();
+                write!(transmit, "i={IMAGE_ID},a=T,U=1,f=32,o=z,t=d,s={w},v={h},").unwrap();
             }
             let more = u8::from(chunk_count > (i + 1));
             write!(transmit, "m={more};{chunk}\x1b\\").unwrap();

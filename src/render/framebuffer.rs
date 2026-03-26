@@ -15,7 +15,9 @@ pub struct Framebuffer {
     /// RGB color per pixel, row-major: index = y * width + x
     pub color: Vec<[u8; 3]>,
     /// Depth (z) per pixel for z-buffer tests. Smaller z = closer to viewer.
-    pub depth: Vec<f64>,
+    /// Uses f32 to halve memory bandwidth for depth operations and improve
+    /// cache utilization (~7 decimal digits is more than enough for screen-space z).
+    pub depth: Vec<f32>,
 }
 
 /// A triangle in screen space, ready for rasterization.
@@ -42,7 +44,7 @@ impl Framebuffer {
             width,
             height,
             color: vec![[0, 0, 0]; n],
-            depth: vec![f64::INFINITY; n],
+            depth: vec![f32::INFINITY; n],
         }
     }
 
@@ -53,13 +55,13 @@ impl Framebuffer {
             *c = [0, 0, 0];
         }
         for d in self.depth.iter_mut() {
-            *d = f64::INFINITY;
+            *d = f32::INFINITY;
         }
     }
 
     /// Set a single pixel if it passes the z-buffer test.
     #[inline]
-    fn set_pixel(&mut self, x: usize, y: usize, z: f64, color: [u8; 3]) {
+    fn set_pixel(&mut self, x: usize, y: usize, z: f32, color: [u8; 3]) {
         let idx = y * self.width + x;
         if z < self.depth[idx] {
             self.depth[idx] = z;
@@ -156,9 +158,9 @@ impl Framebuffer {
 
                 // Inside test (with a tiny epsilon for edge cases)
                 if u >= -1e-6 && v >= -1e-6 && w >= -1e-6 {
-                    // Interpolate z
+                    // Interpolate z (computed in f64 for precision, stored as f32)
                     let z = u * v0[2] + v * v1[2] + w * v2[2];
-                    self.set_pixel(px, py, z, shaded);
+                    self.set_pixel(px, py, z as f32, shaded);
                 }
             }
         }
@@ -177,10 +179,10 @@ impl Framebuffer {
     /// Background pixels (depth == INFINITY) remain unchanged (black).
     pub fn apply_depth_tint(&mut self, fog_color: [u8; 3], fog_strength: f64) {
         // Find z_min and z_max across all valid (non-background) pixels.
-        let mut z_min = f64::INFINITY;
-        let mut z_max = f64::NEG_INFINITY;
+        let mut z_min = f32::INFINITY;
+        let mut z_max = f32::NEG_INFINITY;
         for &d in &self.depth {
-            if d < f64::INFINITY {
+            if d < f32::INFINITY {
                 if d < z_min { z_min = d; }
                 if d > z_max { z_max = d; }
             }
@@ -188,7 +190,7 @@ impl Framebuffer {
 
         // No valid pixels, or all at the same depth — nothing to tint.
         let z_range = z_max - z_min;
-        if z_range.abs() < 1e-12 {
+        if z_range.abs() < 1e-6 {
             return;
         }
 
@@ -196,11 +198,11 @@ impl Framebuffer {
 
         for i in 0..self.depth.len() {
             let d = self.depth[i];
-            if d >= f64::INFINITY {
+            if d >= f32::INFINITY {
                 continue; // background pixel — leave black
             }
             let t = ((d - z_min) * inv_range).clamp(0.0, 1.0);
-            let blend = t * fog_strength;
+            let blend = t as f64 * fog_strength;
             let c = &mut self.color[i];
             c[0] = (c[0] as f64 + (fog_color[0] as f64 - c[0] as f64) * blend).clamp(0.0, 255.0) as u8;
             c[1] = (c[1] as f64 + (fog_color[1] as f64 - c[1] as f64) * blend).clamp(0.0, 255.0) as u8;
@@ -244,7 +246,7 @@ impl Framebuffer {
             } else {
                 0.0
             };
-            let z = p1[2] * (1.0 - t) + p2[2] * t;
+            let z = (p1[2] * (1.0 - t) + p2[2] * t) as f32;
 
             if x0 >= 0 && y0 >= 0 && (x0 as usize) < self.width && (y0 as usize) < self.height {
                 self.set_pixel(x0 as usize, y0 as usize, z, color);
@@ -324,7 +326,7 @@ impl Framebuffer {
             } else {
                 0.0
             };
-            let z = p1[2] * (1.0 - t) + p2[2] * t;
+            let z = (p1[2] * (1.0 - t) + p2[2] * t) as f32;
 
             // Accumulate Euclidean distance from previous pixel.
             let step_dx = (x0 - prev_x) as f64;
@@ -444,7 +446,7 @@ impl Framebuffer {
             for x in 0..self.width {
                 let idx = y * self.width + x;
                 let c = self.color[idx];
-                let alpha = if self.depth[idx] >= f64::INFINITY { 0 } else { 255 };
+                let alpha = if self.depth[idx] >= f32::INFINITY { 0 } else { 255 };
                 img.put_pixel(x as u32, y as u32, image::Rgba([c[0], c[1], c[2], alpha]));
             }
         }
@@ -478,7 +480,7 @@ impl Framebuffer {
             for px in ix_min..=ix_max {
                 let dx = px as f64 + 0.5 - cx;
                 if dx * dx + dy_sq <= r_sq {
-                    self.set_pixel(px, py, z, color);
+                    self.set_pixel(px, py, z as f32, color);
                 }
             }
         }

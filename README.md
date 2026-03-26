@@ -120,7 +120,18 @@ Automatically detects AlphaFold structures and offers pLDDT confidence coloring.
 
 ## Installation
 
+Requires [Rust 1.85+](https://www.rust-lang.org/tools/install). If you don't have Rust, install it with:
+
 ```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Then install proteinview:
+
+```bash
+git clone https://github.com/001TMF/ProteinView.git
+cd ProteinView
+
 # Basic install
 cargo install --path .
 

@@ -112,6 +112,10 @@ pub struct App {
     /// `terminal.clear()` before the next draw, forcing ratatui to redraw
     /// every cell and preventing stale content from the previous mode.
     pub needs_clear: bool,
+    /// Saved color scheme type to restore when leaving interface mode.
+    /// When interface mode is active, we display Interface colors but
+    /// preserve the user's chosen scheme so it can be restored on exit.
+    saved_color_scheme_type: ColorSchemeType,
 }
 
 impl App {
@@ -200,13 +204,20 @@ impl App {
             ssh_hd_warning: false,
             ssh_hd_warning_frames: 0,
             needs_clear: false,
+            saved_color_scheme_type: initial_scheme,
         }
     }
 
     pub fn cycle_color(&mut self) {
-        let next = self.color_scheme.scheme_type.next(self.has_plddt);
-        self.color_scheme = ColorScheme::new(next, self.protein.residue_count());
-        self.mesh_dirty = true;
+        if self.show_interface {
+            // While interface mode is active, cycle the saved scheme so the
+            // user's preference is tracked, but keep displaying Interface colors.
+            self.saved_color_scheme_type = self.saved_color_scheme_type.next(self.has_plddt);
+        } else {
+            let next = self.color_scheme.scheme_type.next(self.has_plddt);
+            self.color_scheme = ColorScheme::new(next, self.protein.residue_count());
+            self.mesh_dirty = true;
+        }
     }
 
     pub fn cycle_viz_mode(&mut self) {
@@ -226,11 +237,14 @@ impl App {
     pub fn toggle_interface(&mut self) {
         self.show_interface = !self.show_interface;
         if self.show_interface {
+            // Save the user's current color scheme before switching to Interface
+            self.saved_color_scheme_type = self.color_scheme.scheme_type;
             self.rebuild_interface_colors();
         } else {
             self.show_interactions = false;
+            // Restore the user's saved color scheme instead of hardcoding Structure
             self.color_scheme = ColorScheme::new(
-                ColorSchemeType::Structure,
+                self.saved_color_scheme_type,
                 self.protein.residue_count(),
             );
             self.mesh_dirty = true;

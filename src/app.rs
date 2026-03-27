@@ -414,7 +414,6 @@ impl App {
     /// Returns `true` when the scene is being actively animated (e.g. auto-rotate).
     /// Used to trigger half-resolution rendering in FullHD mode for smoother
     /// frame rates on large structures.
-    #[allow(dead_code)]
     pub fn is_interacting(&self) -> bool {
         self.camera.auto_rotate
     }

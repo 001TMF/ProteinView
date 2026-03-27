@@ -1,3 +1,5 @@
+use std::sync::mpsc;
+
 use ratatui_image::picker::Picker;
 
 use crate::model::interface::{analyze_interface, analyze_binding_pockets, InterfaceAnalysis};
@@ -121,9 +123,11 @@ pub struct App {
     /// preserve the user's chosen scheme so it can be restored on exit.
     saved_color_scheme_type: ColorSchemeType,
     /// Whether interface analysis has been computed. For large structures
-    /// (> LARGE_STRUCTURE_THRESHOLD residues), computation is deferred until
-    /// the user first toggles interface mode.
+    /// (> LARGE_STRUCTURE_THRESHOLD residues), computation starts on a
+    /// background thread at startup and completes before the user needs it.
     interface_computed: bool,
+    /// Receiver for background interface analysis (large structures only).
+    interface_rx: Option<mpsc::Receiver<InterfaceAnalysis>>,
 }
 
 impl App {
@@ -181,8 +185,26 @@ impl App {
         // For large structures, defer interface analysis until the user
         // actually requests it (press 'f') to avoid the O(chains^2 * atoms^2)
         // startup cost.
+        // For large structures, start interface analysis on a background thread
+        // so it's ready by the time the user presses 'f'.
+        let interface_rx = if is_large {
+            let bg_protein = protein.clone();
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let mut ia = analyze_interface(&bg_protein, 4.5);
+                if !bg_protein.ligands.is_empty() {
+                    ia.binding_pockets = Some(analyze_binding_pockets(&bg_protein, 4.5));
+                }
+                let _ = tx.send(ia);
+            });
+            // Interface analysis is running in the background — it'll be ready
+            // by the time the user presses 'f'.
+            Some(rx)
+        } else {
+            None
+        };
+
         let (interface_analysis, interface_computed) = if is_large {
-            eprintln!("Large structure (>5000 residues): interface analysis deferred until requested");
             let empty = InterfaceAnalysis {
                 contacts: Vec::new(),
                 interface_residues: std::collections::HashSet::new(),
@@ -203,7 +225,7 @@ impl App {
         // For large structures, default to Backbone mode for instant
         // interactivity. The user can press 'v' to switch to Cartoon.
         let viz_mode = if is_large && viz_mode == VizMode::Cartoon {
-            eprintln!("Large structure: defaulting to Backbone mode (press v for Cartoon)");
+            // Large structure: auto-select Backbone for interactivity.
             VizMode::Backbone
         } else {
             viz_mode
@@ -238,6 +260,7 @@ impl App {
             needs_clear: false,
             saved_color_scheme_type: initial_scheme,
             interface_computed,
+            interface_rx,
         }
     }
 
@@ -250,6 +273,21 @@ impl App {
             let next = self.color_scheme.scheme_type.next(self.has_plddt);
             self.color_scheme = ColorScheme::new(next, self.protein.residue_count());
             self.mesh_dirty = true;
+        }
+    }
+
+    /// Poll the background interface analysis thread (non-blocking).
+    /// Called each frame so results are absorbed as soon as they're ready.
+    pub fn poll_background_interface(&mut self) {
+        if self.interface_computed {
+            return;
+        }
+        if let Some(rx) = &self.interface_rx {
+            if let Ok(ia) = rx.try_recv() {
+                self.interface_analysis = ia;
+                self.interface_computed = true;
+                self.interface_rx = None;
+            }
         }
     }
 
@@ -270,15 +308,31 @@ impl App {
     pub fn toggle_interface(&mut self) {
         self.show_interface = !self.show_interface;
         if self.show_interface {
-            // Lazily compute interface analysis on first request (large structures).
+            // Check if background analysis is ready, otherwise compute synchronously.
             if !self.interface_computed {
-                self.interface_analysis = {
+                if let Some(rx) = self.interface_rx.take() {
+                    // Background thread was spawned — wait for it (likely already done).
+                    match rx.recv() {
+                        Ok(ia) => self.interface_analysis = ia,
+                        Err(_) => {
+                            // Thread panicked; fall back to synchronous.
+                            let mut ia = analyze_interface(&self.protein, 4.5);
+                            if !self.protein.ligands.is_empty() {
+                                ia.binding_pockets =
+                                    Some(analyze_binding_pockets(&self.protein, 4.5));
+                            }
+                            self.interface_analysis = ia;
+                        }
+                    }
+                } else {
+                    // No background thread — compute synchronously.
                     let mut ia = analyze_interface(&self.protein, 4.5);
                     if !self.protein.ligands.is_empty() {
-                        ia.binding_pockets = Some(analyze_binding_pockets(&self.protein, 4.5));
+                        ia.binding_pockets =
+                            Some(analyze_binding_pockets(&self.protein, 4.5));
                     }
-                    ia
-                };
+                    self.interface_analysis = ia;
+                }
                 self.interface_computed = true;
             }
             // Save the user's current color scheme before switching to Interface

@@ -353,6 +353,7 @@ fn main() -> Result<()> {
         }
 
         app.tick();
+        app.poll_background_interface();
 
         // Sleep for the remainder of the tick period to cap at ~30 FPS.
         // Account for the time already spent drawing so the frame rate stays

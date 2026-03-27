@@ -210,23 +210,116 @@ impl Framebuffer {
         }
     }
 
+    /// Cohen-Sutherland line clipping against framebuffer bounds [0, width) x [0, height).
+    ///
+    /// Returns `Some((clipped_p1, clipped_p2))` with z interpolated at clipped
+    /// endpoints, or `None` if the line is entirely outside the framebuffer.
+    fn clip_line_3d(&self, p1: [f64; 3], p2: [f64; 3]) -> Option<([f64; 3], [f64; 3])> {
+        // Outcode bit flags
+        const INSIDE: u8 = 0b0000;
+        const LEFT:   u8 = 0b0001;
+        const RIGHT:  u8 = 0b0010;
+        const BOTTOM: u8 = 0b0100;
+        const TOP:    u8 = 0b1000;
+
+        let x_min = 0.0_f64;
+        let y_min = 0.0_f64;
+        let x_max = (self.width as f64) - 1.0;
+        let y_max = (self.height as f64) - 1.0;
+
+        let outcode = |x: f64, y: f64| -> u8 {
+            let mut code = INSIDE;
+            if x < x_min { code |= LEFT; }
+            else if x > x_max { code |= RIGHT; }
+            if y < y_min { code |= TOP; }
+            else if y > y_max { code |= BOTTOM; }
+            code
+        };
+
+        let mut x0 = p1[0];
+        let mut y0 = p1[1];
+        let mut z0 = p1[2];
+        let mut x1 = p2[0];
+        let mut y1 = p2[1];
+        let mut z1 = p2[2];
+
+        let mut code0 = outcode(x0, y0);
+        let mut code1 = outcode(x1, y1);
+
+        loop {
+            if (code0 | code1) == INSIDE {
+                // Both inside — accept
+                return Some(([x0, y0, z0], [x1, y1, z1]));
+            }
+            if (code0 & code1) != INSIDE {
+                // Both on same side — trivial reject
+                return None;
+            }
+
+            // Pick the endpoint that is outside
+            let code_out = if code0 != INSIDE { code0 } else { code1 };
+
+            // Find intersection with clip boundary
+            let dx = x1 - x0;
+            let dy = y1 - y0;
+
+            let (x, y, t);
+            if (code_out & TOP) != 0 {
+                // Clip against top edge (y_min)
+                t = (y_min - y0) / dy;
+                x = x0 + dx * t;
+                y = y_min;
+            } else if (code_out & BOTTOM) != 0 {
+                // Clip against bottom edge (y_max)
+                t = (y_max - y0) / dy;
+                x = x0 + dx * t;
+                y = y_max;
+            } else if (code_out & RIGHT) != 0 {
+                // Clip against right edge (x_max)
+                t = (x_max - x0) / dx;
+                x = x_max;
+                y = y0 + dy * t;
+            } else {
+                // Clip against left edge (x_min)
+                t = (x_min - x0) / dx;
+                x = x_min;
+                y = y0 + dy * t;
+            }
+
+            // Interpolate z at the clipped point
+            let z = z0 + (z1 - z0) * t;
+
+            if code_out == code0 {
+                x0 = x;
+                y0 = y;
+                z0 = z;
+                code0 = outcode(x0, y0);
+            } else {
+                x1 = x;
+                y1 = y;
+                z1 = z;
+                code1 = outcode(x1, y1);
+            }
+        }
+    }
+
     /// Draw a 3D line with Bresenham's algorithm and z-interpolation.
     ///
     /// Useful for wireframe and ball-and-stick rendering modes.
     /// `p1` and `p2` are `[x, y, z]` in screen/pixel space.
+    /// Uses Cohen-Sutherland clipping to avoid long Bresenham walks for
+    /// mostly off-screen lines.
     pub fn draw_line_3d(&mut self, p1: [f64; 3], p2: [f64; 3], color: [u8; 3]) {
-        let mut x0 = p1[0].round() as isize;
-        let mut y0 = p1[1].round() as isize;
-        let x1 = p2[0].round() as isize;
-        let y1 = p2[1].round() as isize;
+        // Clip the line to framebuffer bounds before rasterizing.
+        let (cp1, cp2) = match self.clip_line_3d(p1, p2) {
+            Some(clipped) => clipped,
+            None => return,
+        };
 
-        // Skip lines where both endpoints are entirely off the same side of the screen.
-        let w = self.width as isize;
-        let h = self.height as isize;
-        if (x0 < 0 && x1 < 0) || (x0 >= w && x1 >= w) ||
-           (y0 < 0 && y1 < 0) || (y0 >= h && y1 >= h) {
-            return;
-        }
+        let mut x0 = cp1[0].round() as isize;
+        let mut y0 = cp1[1].round() as isize;
+        let x1 = cp2[0].round() as isize;
+        let y1 = cp2[1].round() as isize;
 
         let dx = (x1 - x0).abs();
         let dy = -(y1 - y0).abs();
@@ -240,14 +333,15 @@ impl Framebuffer {
         loop {
             // Compute interpolation parameter t
             let t = if total_steps > 0.0 {
-                let from_start_x = (x0 - p1[0].round() as isize).unsigned_abs() as f64;
-                let from_start_y = (y0 - p1[1].round() as isize).unsigned_abs() as f64;
+                let from_start_x = (x0 - cp1[0].round() as isize).unsigned_abs() as f64;
+                let from_start_y = (y0 - cp1[1].round() as isize).unsigned_abs() as f64;
                 from_start_x.max(from_start_y) / total_steps
             } else {
                 0.0
             };
-            let z = (p1[2] * (1.0 - t) + p2[2] * t) as f32;
+            let z = (cp1[2] * (1.0 - t) + cp2[2] * t) as f32;
 
+            // After clipping, all pixels should be in bounds, but guard anyway
             if x0 >= 0 && y0 >= 0 && (x0 as usize) < self.width && (y0 as usize) < self.height {
                 self.set_pixel(x0 as usize, y0 as usize, z, color);
             }
@@ -274,6 +368,8 @@ impl Framebuffer {
     /// and skipping (`gap_len` pixels) based on accumulated pixel distance
     /// along the line.  Z-interpolation is maintained throughout so that the
     /// dashed segments interact correctly with the z-buffer.
+    /// Uses Cohen-Sutherland clipping to avoid long Bresenham walks for
+    /// mostly off-screen lines.
     pub fn draw_dashed_line_3d(
         &mut self,
         p1: [f64; 3],
@@ -290,19 +386,16 @@ impl Framebuffer {
             return;
         }
 
-        let mut x0 = p1[0].round() as isize;
-        let mut y0 = p1[1].round() as isize;
-        let x1 = p2[0].round() as isize;
-        let y1 = p2[1].round() as isize;
+        // Clip the line to framebuffer bounds before rasterizing.
+        let (cp1, cp2) = match self.clip_line_3d(p1, p2) {
+            Some(clipped) => clipped,
+            None => return,
+        };
 
-        // Skip lines where both endpoints are entirely off the same side.
-        let w = self.width as isize;
-        let h = self.height as isize;
-        if (x0 < 0 && x1 < 0) || (x0 >= w && x1 >= w)
-            || (y0 < 0 && y1 < 0) || (y0 >= h && y1 >= h)
-        {
-            return;
-        }
+        let mut x0 = cp1[0].round() as isize;
+        let mut y0 = cp1[1].round() as isize;
+        let x1 = cp2[0].round() as isize;
+        let y1 = cp2[1].round() as isize;
 
         let dx = (x1 - x0).abs();
         let dy = -(y1 - y0).abs();
@@ -320,13 +413,13 @@ impl Framebuffer {
         loop {
             // Compute interpolation parameter t for z.
             let t = if total_steps > 0.0 {
-                let from_start_x = (x0 - p1[0].round() as isize).unsigned_abs() as f64;
-                let from_start_y = (y0 - p1[1].round() as isize).unsigned_abs() as f64;
+                let from_start_x = (x0 - cp1[0].round() as isize).unsigned_abs() as f64;
+                let from_start_y = (y0 - cp1[1].round() as isize).unsigned_abs() as f64;
                 from_start_x.max(from_start_y) / total_steps
             } else {
                 0.0
             };
-            let z = (p1[2] * (1.0 - t) + p2[2] * t) as f32;
+            let z = (cp1[2] * (1.0 - t) + cp2[2] * t) as f32;
 
             // Accumulate Euclidean distance from previous pixel.
             let step_dx = (x0 - prev_x) as f64;
@@ -339,6 +432,7 @@ impl Framebuffer {
             let phase = accumulated % cycle;
             let drawing = phase < dash_len;
 
+            // After clipping, all pixels should be in bounds, but guard anyway
             if drawing
                 && x0 >= 0
                 && y0 >= 0

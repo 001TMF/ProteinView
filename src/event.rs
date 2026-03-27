@@ -6,10 +6,18 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyEvent};
 
-/// Spawns a dedicated input thread that sends key events through a channel.
+/// Application-level event that wraps terminal events we care about.
+pub enum AppEvent {
+    /// A keyboard input event.
+    Key(KeyEvent),
+    /// The terminal was resized to (columns, rows).
+    Resize(u16, u16),
+}
+
+/// Spawns a dedicated input thread that sends key and resize events through a channel.
 /// The thread checks `quit_flag` each iteration and stops when it's set.
 /// Returns (receiver, quit_flag).
-pub fn spawn_input_thread() -> (mpsc::Receiver<KeyEvent>, Arc<AtomicBool>) {
+pub fn spawn_input_thread() -> (mpsc::Receiver<AppEvent>, Arc<AtomicBool>) {
     let (tx, rx) = mpsc::channel();
     let quit_flag = Arc::new(AtomicBool::new(false));
     let quit = quit_flag.clone();
@@ -21,10 +29,18 @@ pub fn spawn_input_thread() -> (mpsc::Receiver<KeyEvent>, Arc<AtomicBool>) {
             }
             // Poll with short timeout so we can check quit_flag regularly
             if event::poll(Duration::from_millis(10)).unwrap_or(false) {
-                if let Ok(Event::Key(key)) = event::read() {
-                    if tx.send(key).is_err() {
-                        break; // receiver dropped
+                match event::read() {
+                    Ok(Event::Key(key)) => {
+                        if tx.send(AppEvent::Key(key)).is_err() {
+                            break; // receiver dropped
+                        }
                     }
+                    Ok(Event::Resize(w, h)) => {
+                        if tx.send(AppEvent::Resize(w, h)).is_err() {
+                            break; // receiver dropped
+                        }
+                    }
+                    _ => {}
                 }
             }
         }

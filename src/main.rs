@@ -18,7 +18,7 @@ use crossterm::{
 use ratatui::prelude::*;
 use ratatui::layout::{Constraint, Direction, Layout};
 
-use app::{App, ConnectionType, RenderMode};
+use app::{App, ConnectionType, RenderMode, VizMode};
 
 macro_rules! log {
     ($file:expr, $($arg:tt)*) => {
@@ -53,8 +53,8 @@ struct Cli {
     #[arg(long, default_value = "structure")]
     color: String,
 
-    /// Visualization mode: backbone, wireframe
-    #[arg(long, default_value = "backbone")]
+    /// Visualization mode: cartoon, backbone, wireframe
+    #[arg(long, default_value = "cartoon")]
     mode: String,
 
     /// Fetch structure from RCSB PDB by ID
@@ -167,8 +167,19 @@ fn main() -> Result<()> {
         }
     };
 
+    // Parse CLI visualization mode override
+    let viz_mode = match cli.mode.to_ascii_lowercase().as_str() {
+        "cartoon" => VizMode::Cartoon,
+        "backbone" => VizMode::Backbone,
+        "wireframe" => VizMode::Wireframe,
+        _ => {
+            eprintln!("Warning: unknown visualization mode '{}', using cartoon", cli.mode);
+            VizMode::Cartoon
+        }
+    };
+
     // Create app with actual terminal dimensions for dynamic zoom
-    let mut app = App::new(protein, render_mode, term_cols, term_rows, picker, color_override);
+    let mut app = App::new(protein, render_mode, term_cols, term_rows, picker, color_override, viz_mode);
     log!(logfile, "app created: render_mode={:?} chains={} zoom={:.2}", app.render_mode, app.protein.chains.len(), app.camera.zoom);
 
     // Spawn dedicated input thread — decouples input from rendering so
@@ -186,48 +197,57 @@ fn main() -> Result<()> {
     loop {
         // Drain all queued input from the dedicated input thread
         let mut had_input = false;
-        while let Ok(key) = input_rx.try_recv() {
+        while let Ok(app_event) = input_rx.try_recv() {
             had_input = true;
-            log!(logfile, "key: {:?}", key.code);
-            match key.code {
-                KeyCode::Char('q') => app.should_quit = true,
-                KeyCode::Char('c') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => app.should_quit = true,
-                KeyCode::Char('h') | KeyCode::Left => app.camera.rotate_y(-1.0),
-                KeyCode::Char('l') | KeyCode::Right => app.camera.rotate_y(1.0),
-                KeyCode::Char('j') | KeyCode::Down => app.camera.rotate_x(1.0),
-                KeyCode::Char('k') | KeyCode::Up => app.camera.rotate_x(-1.0),
-                KeyCode::Char('u') => app.camera.rotate_z(-1.0),
-                KeyCode::Char('i') => app.camera.rotate_z(1.0),
-                KeyCode::Char('+') | KeyCode::Char('=') => app.camera.zoom_in(),
-                KeyCode::Char('-') => app.camera.zoom_out(),
-                KeyCode::Char('w') => app.camera.pan(0.0, 1.0),
-                KeyCode::Char('s') => app.camera.pan(0.0, -1.0),
-                KeyCode::Char('a') => app.camera.pan(-1.0, 0.0),
-                KeyCode::Char('d') => app.camera.pan(1.0, 0.0),
-                KeyCode::Char('r') => {
-                    let (cols, rows) = crossterm::terminal::size().unwrap_or((term_cols, term_rows));
-                    app.camera.reset();
+            match app_event {
+                event::AppEvent::Resize(cols, rows) => {
+                    log!(logfile, "resize: {}x{}", cols, rows);
                     app.recalculate_zoom(cols, rows);
-                },
-                KeyCode::Char('c') => app.cycle_color(),
-                KeyCode::Char('v') => app.cycle_viz_mode(),
-                KeyCode::Char('m') => {
-                    let (cols, rows) = crossterm::terminal::size().unwrap_or((term_cols, term_rows));
-                    app.toggle_hd(cols, rows);
-                },
-                KeyCode::Char('M') => {
-                    let (cols, rows) = crossterm::terminal::size().unwrap_or((term_cols, term_rows));
-                    app.toggle_fullhd(cols, rows);
-                },
-                KeyCode::Char('[') => app.prev_chain(),
-                KeyCode::Char(']') => app.next_chain(),
-                KeyCode::Char(' ') => app.camera.auto_rotate = !app.camera.auto_rotate,
-                KeyCode::Char('f') => app.toggle_interface(),
-                KeyCode::Char('I') => app.toggle_interactions(),
-                KeyCode::Char('g') => app.toggle_ligands(),
-                KeyCode::Char('?') => app.show_help = !app.show_help,
-                KeyCode::Esc => { if app.show_help { app.show_help = false; } },
-                _ => {}
+                    app.mesh_dirty_flag();
+                }
+                event::AppEvent::Key(key) => {
+                    log!(logfile, "key: {:?}", key.code);
+                    match key.code {
+                        KeyCode::Char('q') => app.should_quit = true,
+                        KeyCode::Char('c') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => app.should_quit = true,
+                        KeyCode::Char('h') | KeyCode::Left => app.camera.rotate_y(-1.0),
+                        KeyCode::Char('l') | KeyCode::Right => app.camera.rotate_y(1.0),
+                        KeyCode::Char('j') | KeyCode::Down => app.camera.rotate_x(1.0),
+                        KeyCode::Char('k') | KeyCode::Up => app.camera.rotate_x(-1.0),
+                        KeyCode::Char('u') => app.camera.rotate_z(-1.0),
+                        KeyCode::Char('i') => app.camera.rotate_z(1.0),
+                        KeyCode::Char('+') | KeyCode::Char('=') => app.camera.zoom_in(),
+                        KeyCode::Char('-') => app.camera.zoom_out(),
+                        KeyCode::Char('w') => app.camera.pan(0.0, 1.0),
+                        KeyCode::Char('s') => app.camera.pan(0.0, -1.0),
+                        KeyCode::Char('a') => app.camera.pan(-1.0, 0.0),
+                        KeyCode::Char('d') => app.camera.pan(1.0, 0.0),
+                        KeyCode::Char('r') => {
+                            let (cols, rows) = crossterm::terminal::size().unwrap_or((term_cols, term_rows));
+                            app.camera.reset();
+                            app.recalculate_zoom(cols, rows);
+                        },
+                        KeyCode::Char('c') => app.cycle_color(),
+                        KeyCode::Char('v') => app.cycle_viz_mode(),
+                        KeyCode::Char('m') => {
+                            let (cols, rows) = crossterm::terminal::size().unwrap_or((term_cols, term_rows));
+                            app.toggle_hd(cols, rows);
+                        },
+                        KeyCode::Char('M') => {
+                            let (cols, rows) = crossterm::terminal::size().unwrap_or((term_cols, term_rows));
+                            app.toggle_fullhd(cols, rows);
+                        },
+                        KeyCode::Char('[') => app.prev_chain(),
+                        KeyCode::Char(']') => app.next_chain(),
+                        KeyCode::Char(' ') => app.camera.auto_rotate = !app.camera.auto_rotate,
+                        KeyCode::Char('f') => app.toggle_interface(),
+                        KeyCode::Char('I') => app.toggle_interactions(),
+                        KeyCode::Char('g') => app.toggle_ligands(),
+                        KeyCode::Char('?') => app.show_help = !app.show_help,
+                        KeyCode::Esc => { if app.show_help { app.show_help = false; } },
+                        _ => {}
+                    }
+                }
             }
         }
 

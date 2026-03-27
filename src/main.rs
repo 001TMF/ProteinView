@@ -64,10 +64,23 @@ struct Cli {
     /// Write debug log to file (e.g. --log debug.log)
     #[arg(long)]
     log: Option<String>,
+
+    /// Number of render threads (default: 4)
+    #[arg(long, default_value = "4")]
+    threads: usize,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Cap rayon thread pool. 4 threads is the sweet spot: the framebuffer
+    // only has ~60 tiles (64x64) so more threads hit diminishing returns,
+    // and 4 leaves cores free for the terminal emulator and OS.
+    let num_threads = cli.threads.max(1);
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(num_threads)
+        .build_global()
+        .ok(); // Silently ignore if pool already initialized (e.g. by image crate).
 
     // Determine the file path
     let file_path = if let Some(pdb_id) = &cli.fetch {

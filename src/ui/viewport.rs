@@ -83,7 +83,8 @@ fn render_fullhd_viewport(frame: &mut Frame, area: Rect, app: &App, interactions
     // Even with parallel rasterization, half-res keeps frame rates smooth
     // on large structures.
     let is_graphics = proto != ProtocolType::Halfblocks && font_w > 0 && font_h > 0;
-    let scale = if is_graphics && app.is_interacting() { 0.5 } else { 1.0 };
+    let is_large = app.protein.residue_count() > crate::app::LARGE_STRUCTURE_THRESHOLD;
+    let scale = if is_graphics && is_large && app.is_interacting() { 0.5 } else { 1.0 };
     let (px_w, px_h) = if is_graphics {
         (
             area.width as f64 * font_w as f64 * scale,

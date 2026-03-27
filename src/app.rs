@@ -316,30 +316,41 @@ impl App {
         if self.show_interface {
             // Check if background analysis is ready, otherwise compute synchronously.
             if !self.interface_computed {
-                if let Some(rx) = self.interface_rx.take() {
-                    // Background thread was spawned — wait for it (likely already done).
-                    match rx.recv() {
-                        Ok(ia) => self.interface_analysis = ia,
-                        Err(_) => {
-                            // Thread panicked; fall back to synchronous.
-                            let mut ia = analyze_interface(&self.protein, 4.5);
-                            if !self.protein.ligands.is_empty() {
-                                ia.binding_pockets =
-                                    Some(analyze_binding_pockets(&self.protein, 4.5));
-                            }
-                            self.interface_analysis = ia;
-                        }
+                // Determine background thread status without holding a
+                // long-lived borrow on self.interface_rx.
+                let bg_status = self.interface_rx.as_ref().map(|rx| rx.try_recv());
+                match bg_status {
+                    Some(Ok(ia)) => {
+                        self.interface_analysis = ia;
+                        self.interface_computed = true;
+                        self.interface_rx = None;
                     }
-                } else {
-                    // No background thread — compute synchronously.
+                    Some(Err(mpsc::TryRecvError::Empty)) => {
+                        // Still computing — don't enter interface mode yet.
+                        // poll_background_interface() will absorb the result
+                        // when ready; the user can press `f` again.
+                        self.show_interface = false;
+                        return;
+                    }
+                    Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                        // Thread panicked — drop the rx and fall through to
+                        // synchronous computation below.
+                        self.interface_rx = None;
+                    }
+                    None => {
+                        // No background thread was spawned.
+                    }
+                }
+                // If we still don't have it (no rx, or disconnected), compute synchronously.
+                if !self.interface_computed {
                     let mut ia = analyze_interface(&self.protein, 4.5);
                     if !self.protein.ligands.is_empty() {
                         ia.binding_pockets =
                             Some(analyze_binding_pockets(&self.protein, 4.5));
                     }
                     self.interface_analysis = ia;
+                    self.interface_computed = true;
                 }
-                self.interface_computed = true;
             }
             // Save the user's current color scheme before switching to Interface
             self.saved_color_scheme_type = self.color_scheme.scheme_type;
@@ -398,6 +409,13 @@ impl App {
 
     pub fn chain_names(&self) -> Vec<String> {
         self.protein.chains.iter().map(|c| c.id.clone()).collect()
+    }
+
+    /// Returns `true` when the scene is being actively animated (e.g. auto-rotate).
+    /// Used to trigger half-resolution rendering in FullHD mode for smoother
+    /// frame rates on large structures.
+    pub fn is_interacting(&self) -> bool {
+        self.camera.auto_rotate
     }
 
     pub fn tick(&mut self) {

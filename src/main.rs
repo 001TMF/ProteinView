@@ -259,6 +259,10 @@ fn main() -> Result<()> {
         // Must happen outside terminal.draw() since ribbon_mesh() needs &mut self.
         app.ribbon_mesh();
 
+        // Always poll the background interface thread, even during skipped
+        // frames, so the result is absorbed as soon as it's available.
+        app.poll_background_interface();
+
         // Adaptive frame skipping: if the previous draw took longer than the
         // tick rate, skip frames proportionally.  User input always forces a
         // redraw so the UI stays responsive.
@@ -355,7 +359,6 @@ fn main() -> Result<()> {
         }
 
         app.tick();
-        app.poll_background_interface();
 
         // Sleep for the remainder of the tick period to cap at ~30 FPS.
         // Account for the time already spent drawing so the frame rate stays

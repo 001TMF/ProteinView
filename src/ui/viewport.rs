@@ -97,11 +97,18 @@ fn render_fullhd_viewport(frame: &mut Frame, area: Rect, app: &App, interactions
     };
 
     // Rasterize the 3D scene into a software framebuffer.
-    // Camera zoom is NOT scaled — the Kitty `c=/r=` placement params handle
-    // upscaling the reduced-resolution image to fill the full viewport.
+    // When rendering at reduced resolution, scale camera zoom to match so the
+    // protein fills the same relative area of the smaller buffer. Kitty's
+    // c=/r= params then upscale the result to fill the full viewport.
+    let mut cam = app.camera.clone();
+    if scale < 1.0 {
+        cam.zoom *= scale;
+        cam.pan_x *= scale;
+        cam.pan_y *= scale;
+    }
     let fb = hd::render_hd_framebuffer(
         &app.protein,
-        &app.camera,
+        &cam,
         &app.color_scheme,
         app.viz_mode,
         px_w,

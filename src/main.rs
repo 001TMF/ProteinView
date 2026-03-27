@@ -18,7 +18,7 @@ use crossterm::{
 use ratatui::prelude::*;
 use ratatui::layout::{Constraint, Direction, Layout};
 
-use app::{App, ConnectionType, RenderMode};
+use app::{App, ConnectionType, RenderMode, VizMode};
 
 macro_rules! log {
     ($file:expr, $($arg:tt)*) => {
@@ -53,8 +53,8 @@ struct Cli {
     #[arg(long, default_value = "structure")]
     color: String,
 
-    /// Visualization mode: backbone, wireframe
-    #[arg(long, default_value = "backbone")]
+    /// Visualization mode: cartoon, backbone, wireframe
+    #[arg(long, default_value = "cartoon")]
     mode: String,
 
     /// Fetch structure from RCSB PDB by ID
@@ -167,8 +167,19 @@ fn main() -> Result<()> {
         }
     };
 
+    // Parse CLI visualization mode override
+    let viz_mode = match cli.mode.to_ascii_lowercase().as_str() {
+        "cartoon" => VizMode::Cartoon,
+        "backbone" => VizMode::Backbone,
+        "wireframe" => VizMode::Wireframe,
+        _ => {
+            eprintln!("Warning: unknown visualization mode '{}', using cartoon", cli.mode);
+            VizMode::Cartoon
+        }
+    };
+
     // Create app with actual terminal dimensions for dynamic zoom
-    let mut app = App::new(protein, render_mode, term_cols, term_rows, picker, color_override);
+    let mut app = App::new(protein, render_mode, term_cols, term_rows, picker, color_override, viz_mode);
     log!(logfile, "app created: render_mode={:?} chains={} zoom={:.2}", app.render_mode, app.protein.chains.len(), app.camera.zoom);
 
     // Spawn dedicated input thread — decouples input from rendering so

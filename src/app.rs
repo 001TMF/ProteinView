@@ -122,6 +122,7 @@ impl App {
         term_rows: u16,
         picker: Picker,
         color_override: Option<ColorSchemeType>,
+        viz_mode: VizMode,
     ) -> Self {
         protein.center();
         // If user explicitly requested pLDDT via CLI, trust that even if
@@ -182,7 +183,7 @@ impl App {
             protein,
             camera,
             color_scheme,
-            viz_mode: VizMode::Cartoon,
+            viz_mode,
             current_chain: 0,
             render_mode,
             show_help: false,

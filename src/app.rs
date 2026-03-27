@@ -341,12 +341,14 @@ impl App {
         self.camera.zoom = 0.9 * px_w.min(px_h) / (2.0 * radius);
     }
 
-    /// Toggle between Braille and HalfBlock (HD) mode.
+    /// Cycle lower render tiers: Braille -> HalfBlock -> Braille.
+    /// From FullHD, steps down to HalfBlock (next lower tier).
     /// Bound to `m`.
     pub fn toggle_hd(&mut self, term_cols: u16, term_rows: u16) {
         self.render_mode = match self.render_mode {
             RenderMode::Braille => RenderMode::HalfBlock,
-            _ => RenderMode::Braille,
+            RenderMode::HalfBlock => RenderMode::Braille,
+            RenderMode::FullHD => RenderMode::HalfBlock,
         };
         // Dismiss any stale SSH warning (no longer in FullHD)
         self.ssh_hd_warning = false;

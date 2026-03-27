@@ -36,6 +36,67 @@ pub struct Projected {
     pub z: f64, // depth for z-buffering
 }
 
+/// Pre-computed sin/cos values for a single frame.
+///
+/// Computing `sin_cos()` for each of the three rotation angles is expensive
+/// when done per-vertex (millions of calls per frame).  `ProjectionCache`
+/// evaluates the six trig values once and then reuses them for every
+/// `project()` and `rotate_normal()` call within the frame.
+#[derive(Debug, Clone, Copy)]
+pub struct ProjectionCache {
+    sin_x: f64,
+    cos_x: f64,
+    sin_y: f64,
+    cos_y: f64,
+    sin_z: f64,
+    cos_z: f64,
+    zoom: f64,
+    pan_x: f64,
+    pan_y: f64,
+}
+
+impl ProjectionCache {
+    /// Project a 3D point to 2D using the cached trig values.
+    ///
+    /// The math is identical to [`Camera::project()`] but avoids redundant
+    /// `sin_cos()` evaluations.
+    #[inline]
+    pub fn project(&self, x: f64, y: f64, z: f64) -> Projected {
+        // Rotation around X axis
+        let y1 = y * self.cos_x - z * self.sin_x;
+        let z1 = y * self.sin_x + z * self.cos_x;
+
+        // Rotation around Y axis
+        let x2 = x * self.cos_y + z1 * self.sin_y;
+        let z2 = -x * self.sin_y + z1 * self.cos_y;
+
+        // Rotation around Z axis
+        let x3 = x2 * self.cos_z - y1 * self.sin_z;
+        let y3 = x2 * self.sin_z + y1 * self.cos_z;
+
+        Projected {
+            x: -x3 * self.zoom + self.pan_x,
+            y: y3 * self.zoom + self.pan_y,
+            z: z2,
+        }
+    }
+
+    /// Apply the camera rotation to a direction vector (no zoom/pan).
+    #[inline]
+    pub fn rotate_normal(&self, nx: f64, ny: f64, nz: f64) -> [f64; 3] {
+        let y1 = ny * self.cos_x - nz * self.sin_x;
+        let z1 = ny * self.sin_x + nz * self.cos_x;
+
+        let x2 = nx * self.cos_y + z1 * self.sin_y;
+        let z2 = -nx * self.sin_y + z1 * self.cos_y;
+
+        let x3 = x2 * self.cos_z - y1 * self.sin_z;
+        let y3 = x2 * self.sin_z + y1 * self.cos_z;
+
+        [x3, y3, z2]
+    }
+}
+
 impl Camera {
     const ROT_STEP: f64 = 0.1;
     const ZOOM_STEP: f64 = 0.1;
@@ -100,6 +161,27 @@ impl Camera {
             x: -x3 * self.zoom + self.pan_x,
             y: y3 * self.zoom + self.pan_y,
             z: z2,
+        }
+    }
+
+    /// Pre-compute sin/cos for the current rotation angles.
+    ///
+    /// Call this once per frame and then use [`ProjectionCache::project()`]
+    /// and [`ProjectionCache::rotate_normal()`] for all per-vertex work.
+    pub fn projection_cache(&self) -> ProjectionCache {
+        let (sin_x, cos_x) = self.rot_x.sin_cos();
+        let (sin_y, cos_y) = self.rot_y.sin_cos();
+        let (sin_z, cos_z) = self.rot_z.sin_cos();
+        ProjectionCache {
+            sin_x,
+            cos_x,
+            sin_y,
+            cos_y,
+            sin_z,
+            cos_z,
+            zoom: self.zoom,
+            pan_x: self.pan_x,
+            pan_y: self.pan_y,
         }
     }
 }
@@ -202,5 +284,71 @@ mod tests {
             "rotation after reset_tick_timer + immediate tick should be ~0, got {}",
             cam.rot_y
         );
+    }
+
+    #[test]
+    fn projection_cache_matches_camera_project() {
+        // ProjectionCache::project() must produce identical results to
+        // Camera::project() for any rotation/zoom/pan combination.
+        let mut cam = Camera::default();
+        cam.rot_x = 0.7;
+        cam.rot_y = -1.2;
+        cam.rot_z = 0.3;
+        cam.zoom = 2.5;
+        cam.pan_x = 10.0;
+        cam.pan_y = -5.0;
+
+        let cache = cam.projection_cache();
+        let points = [
+            (1.0, 2.0, 3.0),
+            (-4.0, 0.5, -1.0),
+            (0.0, 0.0, 0.0),
+            (100.0, -200.0, 50.0),
+        ];
+        for (x, y, z) in points {
+            let a = cam.project(x, y, z);
+            let b = cache.project(x, y, z);
+            assert!((a.x - b.x).abs() < 1e-12, "x mismatch for ({x},{y},{z})");
+            assert!((a.y - b.y).abs() < 1e-12, "y mismatch for ({x},{y},{z})");
+            assert!((a.z - b.z).abs() < 1e-12, "z mismatch for ({x},{y},{z})");
+        }
+    }
+
+    #[test]
+    fn projection_cache_rotate_normal_matches() {
+        // Verify rotate_normal matches the standalone rotate_normal logic.
+        let mut cam = Camera::default();
+        cam.rot_x = 0.5;
+        cam.rot_y = -0.8;
+        cam.rot_z = 1.1;
+
+        let cache = cam.projection_cache();
+
+        // Manually compute the expected rotation (same math as Camera::project
+        // but without zoom/pan, and without X negation).
+        let normals = [
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (0.577, 0.577, 0.577),
+        ];
+        for (nx, ny, nz) in normals {
+            let result = cache.rotate_normal(nx, ny, nz);
+
+            // Reproduce the rotation manually
+            let (sin_x, cos_x) = cam.rot_x.sin_cos();
+            let y1 = ny * cos_x - nz * sin_x;
+            let z1 = ny * sin_x + nz * cos_x;
+            let (sin_y, cos_y) = cam.rot_y.sin_cos();
+            let x2 = nx * cos_y + z1 * sin_y;
+            let z2 = -nx * sin_y + z1 * cos_y;
+            let (sin_z, cos_z) = cam.rot_z.sin_cos();
+            let x3 = x2 * cos_z - y1 * sin_z;
+            let y3 = x2 * sin_z + y1 * cos_z;
+
+            assert!((result[0] - x3).abs() < 1e-12, "nx mismatch");
+            assert!((result[1] - y3).abs() < 1e-12, "ny mismatch");
+            assert!((result[2] - z2).abs() < 1e-12, "nz mismatch");
+        }
     }
 }

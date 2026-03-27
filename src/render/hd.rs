@@ -41,14 +41,28 @@ pub fn render_hd_framebuffer(
     // resolutions; ceiling of 3.0 caps growth on 4K terminals.
     let ts = (px_w as f64 / 500.0).clamp(1.0, 3.0);
 
+    // Pre-compute sin/cos once for the entire frame instead of per-vertex.
+    let cache = camera.projection_cache();
+
     match viz_mode {
         VizMode::Cartoon => {
             for tri in mesh {
-                let v0 = camera.project(tri.verts[0][0], tri.verts[0][1], tri.verts[0][2]);
-                let v1 = camera.project(tri.verts[1][0], tri.verts[1][1], tri.verts[1][2]);
-                let v2 = camera.project(tri.verts[2][0], tri.verts[2][1], tri.verts[2][2]);
+                let v0 = cache.project(tri.verts[0][0], tri.verts[0][1], tri.verts[0][2]);
+                let v1 = cache.project(tri.verts[1][0], tri.verts[1][1], tri.verts[1][2]);
+                let v2 = cache.project(tri.verts[2][0], tri.verts[2][1], tri.verts[2][2]);
+
+                // Backface culling: skip triangles whose screen-space winding
+                // indicates they face away from the camera.  The camera negates
+                // X in its projection, so front-facing (CCW in world) triangles
+                // end up with positive signed area in projected coordinates.
+                let signed_area =
+                    (v1.x - v0.x) * (v2.y - v0.y) - (v2.x - v0.x) * (v1.y - v0.y);
+                if signed_area <= 0.0 {
+                    continue;
+                }
+
                 let rotated_normal =
-                    rotate_normal(camera, tri.normal[0], tri.normal[1], tri.normal[2]);
+                    cache.rotate_normal(tri.normal[0], tri.normal[1], tri.normal[2]);
                 let screen_tri = Triangle {
                     verts: [
                         to_pixel(v0.x, v0.y, v0.z, half_w, half_h),
@@ -87,23 +101,6 @@ pub fn render_hd_framebuffer(
     fb
 }
 
-
-/// Apply the camera's rotation to a direction vector (no zoom/pan).
-fn rotate_normal(camera: &Camera, nx: f64, ny: f64, nz: f64) -> [f64; 3] {
-    let (sin_x, cos_x) = camera.rot_x.sin_cos();
-    let y1 = ny * cos_x - nz * sin_x;
-    let z1 = ny * sin_x + nz * cos_x;
-
-    let (sin_y, cos_y) = camera.rot_y.sin_cos();
-    let x2 = nx * cos_y + z1 * sin_y;
-    let z2 = -nx * sin_y + z1 * cos_y;
-
-    let (sin_z, cos_z) = camera.rot_z.sin_cos();
-    let x3 = x2 * cos_z - y1 * sin_z;
-    let y3 = x2 * sin_z + y1 * cos_z;
-
-    [x3, y3, z2]
-}
 
 /// Convert projected coords (centered at origin) to pixel coords (top-left origin).
 #[inline]

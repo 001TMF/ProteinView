@@ -21,6 +21,7 @@ pub struct Framebuffer {
 }
 
 /// A triangle in screen space, ready for rasterization.
+#[allow(dead_code)]
 pub struct Triangle {
     /// Three vertices in screen-space [x, y, z].
     /// x,y are pixel coordinates; z is depth for z-buffering.
@@ -90,6 +91,7 @@ impl Framebuffer {
     ///
     /// Shading uses two-sided half-Lambert wrap lighting with an ambient term.
     /// Depth fog is handled separately via [`apply_depth_tint`] as a post-pass.
+    #[allow(dead_code)]
     pub fn rasterize_triangle_depth(
         &mut self,
         tri: &Triangle,

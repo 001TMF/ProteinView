@@ -1665,6 +1665,7 @@ dependencies = [
  "pdbtbx",
  "ratatui",
  "ratatui-image",
+ "rayon",
  "reqwest",
  "tokio",
 ]

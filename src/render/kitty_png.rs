@@ -107,14 +107,25 @@ impl KittyPngImage {
 
         let mut transmit = String::with_capacity(b64.len() + chunk_count * 80);
 
+        // Include `c=` (columns) and `r=` (rows) parameters so Kitty
+        // scales the image to fill the full placeholder grid.  Without
+        // these, Kitty maps each placeholder cell to font_width x
+        // font_height pixels of the source image — if the image is
+        // smaller than cols*font_w x rows*font_h (e.g. during half-res
+        // interaction rendering), the image would appear in the top-left
+        // corner instead of filling the viewport.
+        let cols = area.width;
+        let rows = area.height;
+
         for (i, chunk) in chunks.iter().enumerate() {
             write!(transmit, "\x1b_Gq=2,").unwrap();
             if i == 0 {
                 // a=T = transmit+display, f=32 = raw RGBA, o=z = zlib compression
                 // t=d = direct (inline), U=1 = use unicode placeholders
+                // c/r = columns/rows the image should span (forces scaling)
                 // Reusing IMAGE_ID causes Kitty to atomically replace the
                 // previous image — no delete needed, no flicker.
-                write!(transmit, "i={IMAGE_ID},a=T,U=1,f=32,o=z,t=d,s={w},v={h},").unwrap();
+                write!(transmit, "i={IMAGE_ID},a=T,U=1,f=32,o=z,t=d,s={w},v={h},c={cols},r={rows},").unwrap();
             }
             let more = u8::from(chunk_count > (i + 1));
             write!(transmit, "m={more};{chunk}\x1b\\").unwrap();

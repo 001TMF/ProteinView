@@ -139,6 +139,7 @@ impl App {
         picker: Picker,
         color_override: Option<ColorSchemeType>,
         viz_mode: VizMode,
+        user_explicit_mode: bool,
     ) -> Self {
         protein.center();
         // If user explicitly requested pLDDT via CLI, trust that even if
@@ -223,9 +224,8 @@ impl App {
         };
 
         // For large structures, default to Backbone mode for instant
-        // interactivity. The user can press 'v' to switch to Cartoon.
-        let viz_mode = if is_large && viz_mode == VizMode::Cartoon {
-            // Large structure: auto-select Backbone for interactivity.
+        // interactivity — but only if the user didn't explicitly choose a mode.
+        let viz_mode = if is_large && !user_explicit_mode && viz_mode == VizMode::Cartoon {
             VizMode::Backbone
         } else {
             viz_mode
@@ -233,7 +233,13 @@ impl App {
 
         let initial_scheme = color_override.unwrap_or(ColorSchemeType::Structure);
         let color_scheme = ColorScheme::new(initial_scheme, total_residues);
-        let mesh_cache = generate_ribbon_mesh(&protein, &color_scheme);
+        // Only build ribbon mesh eagerly if we're actually in Cartoon mode.
+        // For Backbone/Wireframe, defer until the user switches to Cartoon.
+        let (mesh_cache, mesh_dirty) = if viz_mode == VizMode::Cartoon {
+            (generate_ribbon_mesh(&protein, &color_scheme), false)
+        } else {
+            (Vec::new(), true)
+        };
 
         let connection_type = ConnectionType::detect();
 
@@ -252,7 +258,7 @@ impl App {
             should_quit: false,
             has_plddt,
             mesh_cache,
-            mesh_dirty: false,
+            mesh_dirty,
             picker,
             connection_type,
             ssh_hd_warning: false,

@@ -168,6 +168,8 @@ fn main() -> Result<()> {
     };
 
     // Parse CLI visualization mode override
+    let user_explicit_mode = cli.mode.to_ascii_lowercase() != "cartoon"
+        || std::env::args().any(|a| a == "--mode");
     let viz_mode = match cli.mode.to_ascii_lowercase().as_str() {
         "cartoon" => VizMode::Cartoon,
         "backbone" => VizMode::Backbone,
@@ -179,7 +181,7 @@ fn main() -> Result<()> {
     };
 
     // Create app with actual terminal dimensions for dynamic zoom
-    let mut app = App::new(protein, render_mode, term_cols, term_rows, picker, color_override, viz_mode);
+    let mut app = App::new(protein, render_mode, term_cols, term_rows, picker, color_override, viz_mode, user_explicit_mode);
     log!(logfile, "app created: render_mode={:?} chains={} zoom={:.2}", app.render_mode, app.protein.chains.len(), app.camera.zoom);
 
     // Spawn dedicated input thread — decouples input from rendering so

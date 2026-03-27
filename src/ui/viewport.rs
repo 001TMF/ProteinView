@@ -77,10 +77,17 @@ fn render_fullhd_viewport(frame: &mut Frame, area: Rect, app: &App, interactions
     // With a true graphics protocol we render at full pixel resolution
     // (cols * font_width, rows * font_height).  For the colored braille
     // fallback we render at braille resolution: cols*2 wide, rows*4 tall.
-    let (px_w, px_h) = if proto != ProtocolType::Halfblocks && font_w > 0 && font_h > 0 {
+    //
+    // During interaction (auto-rotate), render at half resolution for the
+    // graphics-protocol path.  The terminal GPU upscales via the Kitty `s=`/`v=`
+    // params, so the image still fills the viewport — but we rasterize 4x fewer
+    // pixels for much smoother frame rates on large structures.
+    let is_graphics = proto != ProtocolType::Halfblocks && font_w > 0 && font_h > 0;
+    let scale = if is_graphics && app.is_interacting() { 0.5 } else { 1.0 };
+    let (px_w, px_h) = if is_graphics {
         (
-            area.width as f64 * font_w as f64,
-            area.height as f64 * font_h as f64,
+            area.width as f64 * font_w as f64 * scale,
+            area.height as f64 * font_h as f64 * scale,
         )
     } else {
         (

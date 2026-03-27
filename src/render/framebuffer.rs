@@ -141,19 +141,29 @@ impl Framebuffer {
         }
         let inv_denom = 1.0 / denom;
 
+        // --- Precompute x-step and y-offset terms for barycentric coords ---
+        // u = u_x_step * (pf_x - v2[0]) + u_y
+        // v = v_x_step * (pf_x - v2[0]) + v_y
+        // where u_y, v_y depend only on pf_y (constant per scanline).
+        let u_x_step = (v1[1] - v2[1]) * inv_denom;
+        let v_x_step = (v2[1] - v0[1]) * inv_denom;
+        let u_y_coeff = (v2[0] - v1[0]) * inv_denom;
+        let v_y_coeff = (v0[0] - v2[0]) * inv_denom;
+
         // --- Rasterize pixels in bounding box ---
         for py in min_y..=max_y {
             let pf_y = py as f64 + 0.5; // pixel center
+            let dy = pf_y - v2[1];
+            let u_y = u_y_coeff * dy;
+            let v_y = v_y_coeff * dy;
+
             for px in min_x..=max_x {
                 let pf_x = px as f64 + 0.5; // pixel center
+                let dx = pf_x - v2[0];
 
-                // Barycentric coordinates
-                let u =
-                    ((v1[1] - v2[1]) * (pf_x - v2[0]) + (v2[0] - v1[0]) * (pf_y - v2[1]))
-                        * inv_denom;
-                let v =
-                    ((v2[1] - v0[1]) * (pf_x - v2[0]) + (v0[0] - v2[0]) * (pf_y - v2[1]))
-                        * inv_denom;
+                // Barycentric coordinates (hoisted: 3 muls + 3 adds vs 8 muls + 6 adds)
+                let u = u_x_step * dx + u_y;
+                let v = v_x_step * dx + v_y;
                 let w = 1.0 - u - v;
 
                 // Inside test (with a tiny epsilon for edge cases)

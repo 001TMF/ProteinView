@@ -13,14 +13,54 @@ use crate::model::protein::{is_purine, MoleculeType, Protein, SecondaryStructure
 use crate::render::color::{color_to_rgb, ColorScheme};
 
 // ---------------------------------------------------------------------------
-// Constants
+// Constants & LOD configuration
 // ---------------------------------------------------------------------------
 
-/// Number of spline subdivisions between each pair of C-alpha atoms.
-const SPLINE_SUBDIVISIONS: usize = 14;
+/// Default number of spline subdivisions between each pair of C-alpha atoms.
+const DEFAULT_SPLINE_SUBDIVISIONS: usize = 14;
 
-/// Number of vertices around the coil/turn tube cross-section.
-const COIL_SEGMENTS: usize = 12;
+/// Default number of vertices around the coil/turn tube cross-section.
+const DEFAULT_COIL_SEGMENTS: usize = 12;
+
+/// Reduced spline subdivisions for large structures (>5000 residues).
+const LARGE_SPLINE_SUBDIVISIONS: usize = 4;
+
+/// Reduced coil segments for large structures (>5000 residues).
+const LARGE_COIL_SEGMENTS: usize = 6;
+
+/// Level-of-detail configuration for ribbon mesh generation.
+/// Large structures use reduced subdivision counts to cut triangle count
+/// with zero visible difference at terminal resolution.
+#[derive(Debug, Clone, Copy)]
+struct LodConfig {
+    spline_subdivisions: usize,
+    coil_segments: usize,
+}
+
+impl LodConfig {
+    fn normal() -> Self {
+        Self {
+            spline_subdivisions: DEFAULT_SPLINE_SUBDIVISIONS,
+            coil_segments: DEFAULT_COIL_SEGMENTS,
+        }
+    }
+
+    fn large() -> Self {
+        Self {
+            spline_subdivisions: LARGE_SPLINE_SUBDIVISIONS,
+            coil_segments: LARGE_COIL_SEGMENTS,
+        }
+    }
+
+    /// Pick the appropriate LOD based on residue count.
+    fn for_residue_count(residue_count: usize) -> Self {
+        if residue_count > crate::app::LARGE_STRUCTURE_THRESHOLD {
+            Self::large()
+        } else {
+            Self::normal()
+        }
+    }
+}
 
 /// Cross-section dimensions (in Angstroms).
 const HELIX_HALF_WIDTH: f64 = 1.30;
@@ -270,7 +310,7 @@ struct SplinePoint {
 /// For ribbons (helix/sheet) we return 2 points (left, right) so that the
 /// surface is a flat band.  For coils we return `COIL_SEGMENTS` points in a
 /// circle.
-fn cross_section(sp: &SplinePoint) -> Vec<V3> {
+fn cross_section(sp: &SplinePoint, lod: &LodConfig) -> Vec<V3> {
     match sp.ss {
         SecondaryStructure::Helix => ribbon_cross_section(sp, HELIX_HALF_WIDTH, HELIX_HALF_HEIGHT),
         SecondaryStructure::Sheet => {
@@ -284,7 +324,7 @@ fn cross_section(sp: &SplinePoint) -> Vec<V3> {
             };
             ribbon_cross_section(sp, hw, SHEET_HALF_HEIGHT)
         }
-        SecondaryStructure::Turn | SecondaryStructure::Coil => coil_cross_section(sp),
+        SecondaryStructure::Turn | SecondaryStructure::Coil => coil_cross_section(sp, lod),
     }
 }
 
@@ -304,12 +344,13 @@ fn ribbon_cross_section(sp: &SplinePoint, half_w: f64, half_h: f64) -> Vec<V3> {
 }
 
 /// Circular tube cross-section for coil/turn regions.
-fn coil_cross_section(sp: &SplinePoint) -> Vec<V3> {
+fn coil_cross_section(sp: &SplinePoint, lod: &LodConfig) -> Vec<V3> {
     let n = sp.normal;
     let b = sp.binormal;
-    let mut pts = Vec::with_capacity(COIL_SEGMENTS);
-    for i in 0..COIL_SEGMENTS {
-        let angle = 2.0 * std::f64::consts::PI * (i as f64) / (COIL_SEGMENTS as f64);
+    let segs = lod.coil_segments;
+    let mut pts = Vec::with_capacity(segs);
+    for i in 0..segs {
+        let angle = 2.0 * std::f64::consts::PI * (i as f64) / (segs as f64);
         let (sin_a, cos_a) = angle.sin_cos();
         let offset = v3_add(v3_scale(n, cos_a * COIL_RADIUS), v3_scale(b, sin_a * COIL_RADIUS));
         pts.push(v3_add(sp.pos, offset));
@@ -448,14 +489,15 @@ pub fn generate_ribbon_mesh(
     color_scheme: &ColorScheme,
 ) -> Vec<RibbonTriangle> {
     let mut triangles: Vec<RibbonTriangle> = Vec::new();
+    let lod = LodConfig::for_residue_count(protein.residue_count());
 
     for chain in &protein.chains {
         match chain.molecule_type {
             MoleculeType::Protein => {
-                generate_chain_ribbon(chain, color_scheme, &mut triangles);
+                generate_chain_ribbon(chain, color_scheme, &lod, &mut triangles);
             }
             MoleculeType::RNA | MoleculeType::DNA => {
-                generate_nucleic_acid_ribbon(chain, color_scheme, &mut triangles);
+                generate_nucleic_acid_ribbon(chain, color_scheme, &lod, &mut triangles);
             }
             MoleculeType::SmallMolecule => {
                 // Small molecule rendering handled separately; skip in ribbon pass
@@ -494,7 +536,7 @@ struct CaRecord {
 ///
 /// The `arrow_t` field on every generated `SplinePoint` is set to `None`;
 /// arrowhead logic is protein-specific and lives in `generate_chain_ribbon`.
-fn build_spline_tube(records: &[CaRecord], out: &mut Vec<RibbonTriangle>) {
+fn build_spline_tube(records: &[CaRecord], lod: &LodConfig, out: &mut Vec<RibbonTriangle>) {
     let n = records.len();
     if n < 2 {
         return;
@@ -515,13 +557,13 @@ fn build_spline_tube(records: &[CaRecord], out: &mut Vec<RibbonTriangle>) {
         let p3 = records[i3].pos;
 
         let subdivs = if seg == n - 2 {
-            SPLINE_SUBDIVISIONS + 1
+            lod.spline_subdivisions + 1
         } else {
-            SPLINE_SUBDIVISIONS
+            lod.spline_subdivisions
         };
 
         for sub in 0..subdivs {
-            let t = sub as f64 / SPLINE_SUBDIVISIONS as f64;
+            let t = sub as f64 / lod.spline_subdivisions as f64;
             let pos = catmull_rom(p0, p1, p2, p3, t);
             let ss = if t < 0.5 { records[i1].ss } else { records[i2].ss };
             let color = if t < 0.5 {
@@ -596,10 +638,10 @@ fn build_spline_tube(records: &[CaRecord], out: &mut Vec<RibbonTriangle>) {
     apply_sheet_frame_guides(&mut spline_points);
 
     // --- Step 4: Build cross-sections and emit triangle strips ---
-    let mut prev_ring = cross_section(&spline_points[0]);
+    let mut prev_ring = cross_section(&spline_points[0], lod);
 
     for sp in spline_points.iter().skip(1) {
-        let mut curr_ring = cross_section(sp);
+        let mut curr_ring = cross_section(sp, lod);
         let color = sp.color;
 
         if prev_ring.len() != curr_ring.len() {
@@ -617,7 +659,7 @@ fn build_spline_tube(records: &[CaRecord], out: &mut Vec<RibbonTriangle>) {
     }
 
     // --- Step 5: Cap both ends ---
-    let first_ring = cross_section(&spline_points[0]);
+    let first_ring = cross_section(&spline_points[0], lod);
     emit_cap(
         &first_ring,
         spline_points[0].pos,
@@ -626,7 +668,7 @@ fn build_spline_tube(records: &[CaRecord], out: &mut Vec<RibbonTriangle>) {
         out,
     );
 
-    let last_ring = cross_section(spline_points.last().unwrap());
+    let last_ring = cross_section(spline_points.last().unwrap(), lod);
     emit_cap(
         &last_ring,
         spline_points.last().unwrap().pos,
@@ -639,6 +681,7 @@ fn build_spline_tube(records: &[CaRecord], out: &mut Vec<RibbonTriangle>) {
 fn generate_chain_ribbon(
     chain: &crate::model::protein::Chain,
     color_scheme: &ColorScheme,
+    lod: &LodConfig,
     out: &mut Vec<RibbonTriangle>,
 ) {
     // 1. Collect C-alpha positions, SS types, colors, and frame hints.
@@ -705,13 +748,13 @@ fn generate_chain_ribbon(
         let p3 = cas[i3].pos;
 
         let subdivs = if seg == n - 2 {
-            SPLINE_SUBDIVISIONS + 1 // include the last point
+            lod.spline_subdivisions + 1 // include the last point
         } else {
-            SPLINE_SUBDIVISIONS
+            lod.spline_subdivisions
         };
 
         for sub in 0..subdivs {
-            let t = sub as f64 / SPLINE_SUBDIVISIONS as f64;
+            let t = sub as f64 / lod.spline_subdivisions as f64;
             let pos = catmull_rom(p0, p1, p2, p3, t);
 
             // Interpolated secondary structure: use the nearer residue.
@@ -827,10 +870,10 @@ fn generate_chain_ribbon(
     apply_sheet_frame_guides(&mut spline_points);
 
     // 6. Build cross-sections and emit triangle strips.
-    let mut prev_ring = cross_section(&spline_points[0]);
+    let mut prev_ring = cross_section(&spline_points[0], lod);
 
     for sp in spline_points.iter().skip(1) {
-        let mut curr_ring = cross_section(sp);
+        let mut curr_ring = cross_section(sp, lod);
         let color = sp.color;
 
         // Handle cross-section vertex count mismatch at SS transitions.
@@ -849,7 +892,7 @@ fn generate_chain_ribbon(
     }
 
     // 7. Cap the ends of the ribbon.
-    let first_ring = cross_section(&spline_points[0]);
+    let first_ring = cross_section(&spline_points[0], lod);
     emit_cap(
         &first_ring,
         spline_points[0].pos,
@@ -858,7 +901,7 @@ fn generate_chain_ribbon(
         out,
     );
 
-    let last_ring = cross_section(spline_points.last().unwrap());
+    let last_ring = cross_section(spline_points.last().unwrap(), lod);
     emit_cap(
         &last_ring,
         spline_points.last().unwrap().pos,
@@ -889,6 +932,7 @@ const PURINE_ATOMS: &[&str] = &["N1", "C2", "N3", "C4", "C5", "C6", "N7", "C8", 
 fn generate_nucleic_acid_ribbon(
     chain: &crate::model::protein::Chain,
     color_scheme: &ColorScheme,
+    lod: &LodConfig,
     out: &mut Vec<RibbonTriangle>,
 ) {
     // ----- Part 1: backbone tube through C4' atoms -----
@@ -910,7 +954,7 @@ fn generate_nucleic_acid_ribbon(
         .collect();
 
     // Delegate spline interpolation, framing, and meshing to shared helper.
-    build_spline_tube(&c4_records, out);
+    build_spline_tube(&c4_records, lod, out);
 
     // ----- Part 2: base slabs -----
 

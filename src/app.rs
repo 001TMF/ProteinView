@@ -6,6 +6,10 @@ use crate::render::camera::Camera;
 use crate::render::color::{ColorScheme, ColorSchemeType};
 use crate::render::ribbon::{generate_ribbon_mesh, RibbonTriangle};
 
+/// Structures with more residues than this threshold trigger performance
+/// optimizations (deferred interface analysis, backbone default, reduced LOD).
+pub const LARGE_STRUCTURE_THRESHOLD: usize = 5000;
+
 /// Visualization mode
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VizMode {
@@ -116,6 +120,10 @@ pub struct App {
     /// When interface mode is active, we display Interface colors but
     /// preserve the user's chosen scheme so it can be restored on exit.
     saved_color_scheme_type: ColorSchemeType,
+    /// Whether interface analysis has been computed. For large structures
+    /// (> LARGE_STRUCTURE_THRESHOLD residues), computation is deferred until
+    /// the user first toggles interface mode.
+    interface_computed: bool,
 }
 
 impl App {
@@ -168,13 +176,37 @@ impl App {
         let mut camera = Camera::default();
         camera.zoom = auto_zoom;
 
-        // Pre-compute interface analysis (4.5A cutoff)
-        let interface_analysis = {
+        let is_large = total_residues > LARGE_STRUCTURE_THRESHOLD;
+
+        // For large structures, defer interface analysis until the user
+        // actually requests it (press 'f') to avoid the O(chains^2 * atoms^2)
+        // startup cost.
+        let (interface_analysis, interface_computed) = if is_large {
+            eprintln!("Large structure (>5000 residues): interface analysis deferred until requested");
+            let empty = InterfaceAnalysis {
+                contacts: Vec::new(),
+                interface_residues: std::collections::HashSet::new(),
+                chain_interface_counts: vec![0; protein.chains.len()],
+                total_interface_residues: 0,
+                binding_pockets: None,
+                interactions: Vec::new(),
+            };
+            (empty, false)
+        } else {
             let mut ia = analyze_interface(&protein, 4.5);
             if !protein.ligands.is_empty() {
                 ia.binding_pockets = Some(analyze_binding_pockets(&protein, 4.5));
             }
-            ia
+            (ia, true)
+        };
+
+        // For large structures, default to Backbone mode for instant
+        // interactivity. The user can press 'v' to switch to Cartoon.
+        let viz_mode = if is_large && viz_mode == VizMode::Cartoon {
+            eprintln!("Large structure: defaulting to Backbone mode (press v for Cartoon)");
+            VizMode::Backbone
+        } else {
+            viz_mode
         };
 
         let initial_scheme = color_override.unwrap_or(ColorSchemeType::Structure);
@@ -205,6 +237,7 @@ impl App {
             ssh_hd_warning_frames: 0,
             needs_clear: false,
             saved_color_scheme_type: initial_scheme,
+            interface_computed,
         }
     }
 
@@ -237,6 +270,17 @@ impl App {
     pub fn toggle_interface(&mut self) {
         self.show_interface = !self.show_interface;
         if self.show_interface {
+            // Lazily compute interface analysis on first request (large structures).
+            if !self.interface_computed {
+                self.interface_analysis = {
+                    let mut ia = analyze_interface(&self.protein, 4.5);
+                    if !self.protein.ligands.is_empty() {
+                        ia.binding_pockets = Some(analyze_binding_pockets(&self.protein, 4.5));
+                    }
+                    ia
+                };
+                self.interface_computed = true;
+            }
             // Save the user's current color scheme before switching to Interface
             self.saved_color_scheme_type = self.color_scheme.scheme_type;
             self.rebuild_interface_colors();

@@ -182,7 +182,7 @@ fn main() -> Result<()> {
 
     // Parse CLI visualization mode override
     let user_explicit_mode = cli.mode.to_ascii_lowercase() != "cartoon"
-        || std::env::args().any(|a| a == "--mode");
+        || std::env::args().any(|a| a == "--mode" || a.starts_with("--mode="));
     let viz_mode = match cli.mode.to_ascii_lowercase().as_str() {
         "cartoon" => VizMode::Cartoon,
         "backbone" => VizMode::Backbone,

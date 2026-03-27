@@ -183,9 +183,6 @@ impl App {
 
         let is_large = total_residues > LARGE_STRUCTURE_THRESHOLD;
 
-        // For large structures, defer interface analysis until the user
-        // actually requests it (press 'f') to avoid the O(chains^2 * atoms^2)
-        // startup cost.
         // For large structures, start interface analysis on a background thread
         // so it's ready by the time the user presses 'f'.
         let interface_rx = if is_large {

@@ -308,6 +308,12 @@ impl App {
         }
     }
 
+    /// Mark the ribbon mesh cache as dirty, forcing a rebuild on the next frame.
+    /// Called when terminal resize occurs or other events invalidate the mesh.
+    pub fn mesh_dirty_flag(&mut self) {
+        self.mesh_dirty = true;
+    }
+
     /// Recalculate the zoom factor based on current render mode and terminal size.
     /// Call this after changing `render_mode` so the protein fills the viewport
     /// correctly for the new framebuffer dimensions.

@@ -97,9 +97,15 @@ fn render_fullhd_viewport(frame: &mut Frame, area: Rect, app: &App, interactions
     };
 
     // Rasterize the 3D scene into a software framebuffer.
+    // When rendering at reduced resolution, temporarily scale the camera zoom
+    // so the protein fills the smaller framebuffer correctly. The scale factor
+    // ensures the projection maps identically to the reduced pixel space.
+    let mut cam = app.camera.clone();
+    cam.zoom *= scale;
+
     let fb = hd::render_hd_framebuffer(
         &app.protein,
-        &app.camera,
+        &cam,
         &app.color_scheme,
         app.viz_mode,
         px_w,

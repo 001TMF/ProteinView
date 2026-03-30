@@ -4,6 +4,7 @@ use ratatui::widgets::canvas::{Canvas, Context, Line};
 use crate::app::VizMode;
 use crate::model::interface::{Interaction, InteractionType};
 use crate::model::protein::{LigandType, MoleculeType, Protein};
+use crate::render::bond::atoms_bonded;
 use crate::render::camera::Camera;
 use crate::render::color::ColorScheme;
 
@@ -39,20 +40,6 @@ fn draw_thick_line(
             color,
         });
     }
-}
-
-/// Check whether two atoms are bonded in 3D space.
-/// Returns true if they are in the same residue and within 1.9 Angstroms,
-/// or if they form a peptide bond (C of residue i to N of residue i+1 in same chain).
-fn atoms_bonded_3d(
-    a1_x: f64, a1_y: f64, a1_z: f64,
-    a2_x: f64, a2_y: f64, a2_z: f64,
-) -> bool {
-    let dx = a2_x - a1_x;
-    let dy = a2_y - a1_y;
-    let dz = a2_z - a1_z;
-    let dist_sq = dx * dx + dy * dy + dz * dz;
-    dist_sq <= 1.9 * 1.9
 }
 
 /// Render protein on a ratatui Canvas with the Braille marker.
@@ -148,7 +135,7 @@ fn render_wireframe(
                 for j in (i + 1)..atom_count {
                     let (a1, p1) = &projected[i];
                     let (a2, p2) = &projected[j];
-                    if atoms_bonded_3d(a1.x, a1.y, a1.z, a2.x, a2.y, a2.z) {
+                    if atoms_bonded(&a1.element, a1.x, a1.y, a1.z, &a2.element, a2.x, a2.y, a2.z) {
                         let color = color_scheme.atom_color(a1, residue, chain);
                         draw_thick_line(ctx, p1.x, p1.y, p2.x, p2.y, color, &offsets);
                     }
@@ -222,7 +209,7 @@ fn render_ligands(
                     for j in (i + 1)..projected.len() {
                         let (a1, p1, color) = &projected[i];
                         let (a2, p2, _) = &projected[j];
-                        if atoms_bonded_3d(a1.x, a1.y, a1.z, a2.x, a2.y, a2.z) {
+                        if atoms_bonded(&a1.element, a1.x, a1.y, a1.z, &a2.element, a2.x, a2.y, a2.z) {
                             draw_thick_line(ctx, p1.x, p1.y, p2.x, p2.y, *color, &offsets);
                         }
                     }

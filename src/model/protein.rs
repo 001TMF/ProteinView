@@ -139,12 +139,11 @@ impl Protein {
     pub fn bounding_radius(&self) -> f64 {
         let chain_atoms = self.chains.iter()
             .flat_map(|c| &c.residues)
-            .flat_map(|r| &r.atoms)
-            .filter(|a| a.is_backbone);
+            .flat_map(|r| &r.atoms);
         let ligand_atoms = self.ligands.iter()
             .flat_map(|l| &l.atoms);
-        chain_atoms.map(|a| (a.x * a.x + a.y * a.y + a.z * a.z).sqrt())
-            .chain(ligand_atoms.map(|a| (a.x * a.x + a.y * a.y + a.z * a.z).sqrt()))
+        chain_atoms.chain(ligand_atoms)
+            .map(|a| (a.x * a.x + a.y * a.y + a.z * a.z).sqrt())
             .fold(0.0f64, f64::max)
     }
 

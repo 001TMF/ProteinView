@@ -1,3 +1,4 @@
+pub mod bond;
 pub mod braille;
 pub mod camera;
 pub mod color;

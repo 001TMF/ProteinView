@@ -497,7 +497,16 @@ fn render_ligands_fb(
                     for j in (i + 1)..projected.len() {
                         let (a1, p1, c1) = &projected[i];
                         let (a2, p2, _) = &projected[j];
-                        if atoms_bonded(&a1.element, a1.x, a1.y, a1.z, &a2.element, a2.x, a2.y, a2.z) {
+                        if atoms_bonded(
+                            &a1.element,
+                            a1.x,
+                            a1.y,
+                            a1.z,
+                            &a2.element,
+                            a2.x,
+                            a2.y,
+                            a2.z,
+                        ) {
                             fb.draw_thick_line_3d(*p1, *p2, *c1, 1.5 * ts);
                         }
                     }

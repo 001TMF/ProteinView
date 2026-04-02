@@ -773,6 +773,7 @@ pub fn framebuffer_to_widget(fb: &Framebuffer) -> Paragraph<'static> {
 /// available via `quant_step` but currently disabled (`quant_step = 1`, a
 /// no-op).  Set it to e.g. 4 or 8 to reduce distinct colors and increase
 /// run-length merging at the expense of color precision.
+#[allow(clippy::needless_range_loop)]
 pub fn framebuffer_to_braille_widget(fb: &Framebuffer) -> Paragraph<'static> {
     // Terminal cell grid dimensions derived from the framebuffer.
     let term_cols = fb.width.div_ceil(2);

@@ -1,30 +1,52 @@
-use anyhow::{bail, Context, Result};
-use crate::model::protein::{Protein, Chain, MoleculeType, Residue, Atom, SecondaryStructure};
+use crate::model::protein::{Atom, Chain, MoleculeType, Protein, Residue, SecondaryStructure};
+use anyhow::{Context, Result, bail};
 
-/// Load a molecular structure from an XYZ file.
+/// Parse a molecular structure from XYZ-formatted text.
 ///
 /// XYZ format:
 ///   Line 1: atom count (integer)
 ///   Line 2: comment / title
 ///   Lines 3+: Element  x  y  z
+#[allow(dead_code)]
+pub fn parse_xyz(content: &str) -> Result<Protein> {
+    parse_xyz_inner(content, None)
+}
+
+/// Load a molecular structure from an XYZ file on disk.
 pub fn load_xyz(path: &str) -> Result<Protein> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read XYZ file: {}", path))?;
+    parse_xyz_inner(&content, Some(path))
+}
 
+fn parse_xyz_inner(content: &str, path: Option<&str>) -> Result<Protein> {
     let mut lines = content.lines();
 
     // Line 1: atom count
     let count_line = lines.next().context("XYZ file is empty")?;
-    let atom_count: usize = count_line.trim().parse()
-        .with_context(|| format!("First line must be an atom count, got: '{}'", count_line.trim()))?;
+    let atom_count: usize = count_line.trim().parse().with_context(|| {
+        format!(
+            "First line must be an atom count, got: '{}'",
+            count_line.trim()
+        )
+    })?;
+
+    if atom_count > 10_000_000 {
+        bail!(
+            "XYZ atom count {} exceeds maximum supported (10,000,000)",
+            atom_count
+        );
+    }
 
     // Line 2: comment / title
     let name = lines.next().unwrap_or("").trim().to_string();
     let name = if name.is_empty() {
-        std::path::Path::new(path)
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Unknown".to_string())
+        path.and_then(|p| {
+            std::path::Path::new(p)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "Unknown".to_string())
     } else {
         name
     };
@@ -41,11 +63,14 @@ pub fn load_xyz(path: &str) -> Result<Protein> {
             bail!("Line {}: expected 'Element x y z', got: '{}'", i + 3, line);
         }
         let element = parts[0].to_string();
-        let x: f64 = parts[1].parse()
+        let x: f64 = parts[1]
+            .parse()
             .with_context(|| format!("Line {}: invalid x coordinate '{}'", i + 3, parts[1]))?;
-        let y: f64 = parts[2].parse()
+        let y: f64 = parts[2]
+            .parse()
             .with_context(|| format!("Line {}: invalid y coordinate '{}'", i + 3, parts[2]))?;
-        let z: f64 = parts[3].parse()
+        let z: f64 = parts[3]
+            .parse()
             .with_context(|| format!("Line {}: invalid z coordinate '{}'", i + 3, parts[3]))?;
 
         atoms.push(Atom {
@@ -118,7 +143,12 @@ mod tests {
         let f = write_temp_xyz("5\nBad count\nO 0 0 0\nH 1 0 0\n");
         let result = load_xyz(f.path().to_str().unwrap());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("declares 5 atoms but file contains 2"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("declares 5 atoms but file contains 2")
+        );
     }
 
     #[test]
@@ -134,5 +164,20 @@ mod tests {
         let protein = load_xyz(f.path().to_str().unwrap()).unwrap();
         // Name should be derived from temp file name, not empty
         assert!(!protein.name.is_empty());
+    }
+
+    #[test]
+    fn test_parse_xyz_empty() {
+        let content = "0\nEmpty molecule\n";
+        let protein = parse_xyz(content).unwrap();
+        assert_eq!(protein.chains.len(), 1);
+        assert_eq!(protein.chains[0].residues[0].atoms.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_xyz_rejects_huge_count() {
+        let content = "99999999999\nHuge\n";
+        let result = parse_xyz(content);
+        assert!(result.is_err());
     }
 }

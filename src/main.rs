@@ -225,7 +225,7 @@ fn main() -> Result<()> {
         } else {
             color_override
         };
-        let viz = if cli.mode == "cartoon" {
+        let viz = if !user_explicit_mode {
             VizMode::Wireframe
         } else {
             viz_mode

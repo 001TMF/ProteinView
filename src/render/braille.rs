@@ -230,7 +230,16 @@ fn render_ligands(
                     for j in (i + 1)..projected.len() {
                         let (a1, p1, color) = &projected[i];
                         let (a2, p2, _) = &projected[j];
-                        if atoms_bonded(&a1.element, a1.x, a1.y, a1.z, &a2.element, a2.x, a2.y, a2.z) {
+                        if atoms_bonded(
+                            &a1.element,
+                            a1.x,
+                            a1.y,
+                            a1.z,
+                            &a2.element,
+                            a2.x,
+                            a2.y,
+                            a2.z,
+                        ) {
                             draw_thick_line(ctx, p1.x, p1.y, p2.x, p2.y, *color, &offsets);
                         }
                     }

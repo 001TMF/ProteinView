@@ -102,7 +102,10 @@ fn is_charged_negative(res_name: &str, atom_name: &str) -> bool {
 
 /// Returns true if the residue is typically hydrophobic.
 fn is_hydrophobic_residue(name: &str) -> bool {
-    matches!(name, "ALA" | "VAL" | "LEU" | "ILE" | "PHE" | "TRP" | "MET" | "PRO")
+    matches!(
+        name,
+        "ALA" | "VAL" | "LEU" | "ILE" | "PHE" | "TRP" | "MET" | "PRO"
+    )
 }
 
 /// Classify inter-chain interactions from the given contacts.
@@ -127,10 +130,18 @@ fn classify_interactions(protein: &Protein, contacts: &[Contact]) -> Vec<Interac
     let mut interactions = Vec::with_capacity(contacts.len());
 
     for contact in contacts {
-        let Some(chain_a) = protein.chains.get(contact.chain_a) else { continue };
-        let Some(chain_b) = protein.chains.get(contact.chain_b) else { continue };
-        let Some(res_a) = chain_a.residues.get(contact.residue_a) else { continue };
-        let Some(res_b) = chain_b.residues.get(contact.residue_b) else { continue };
+        let Some(chain_a) = protein.chains.get(contact.chain_a) else {
+            continue;
+        };
+        let Some(chain_b) = protein.chains.get(contact.chain_b) else {
+            continue;
+        };
+        let Some(res_a) = chain_a.residues.get(contact.residue_a) else {
+            continue;
+        };
+        let Some(res_b) = chain_b.residues.get(contact.residue_b) else {
+            continue;
+        };
 
         // Find the closest heavy-atom pair.
         let mut best_dist_sq = f64::MAX;
@@ -172,10 +183,8 @@ fn classify_interactions(protein: &Protein, contacts: &[Contact]) -> Vec<Interac
         } else if distance <= 3.5 {
             let el_a = atom_a.element.as_str();
             let el_b = atom_b.element.as_str();
-            let donor_acceptor = matches!(el_a, "N" | "O")
-                && matches!(el_b, "N" | "O" | "S");
-            let acceptor_donor = matches!(el_b, "N" | "O")
-                && matches!(el_a, "N" | "O" | "S");
+            let donor_acceptor = matches!(el_a, "N" | "O") && matches!(el_b, "N" | "O" | "S");
+            let acceptor_donor = matches!(el_b, "N" | "O") && matches!(el_a, "N" | "O" | "S");
             if donor_acceptor || acceptor_donor {
                 InteractionType::HydrogenBond
             } else if el_a == "C"
@@ -272,7 +281,11 @@ pub fn analyze_interface(protein: &Protein, cutoff: f64) -> InterfaceAnalysis {
     }
 
     // Sort contacts by minimum distance (closest first).
-    contacts.sort_by(|a, b| a.min_distance.partial_cmp(&b.min_distance).unwrap_or(std::cmp::Ordering::Equal));
+    contacts.sort_by(|a, b| {
+        a.min_distance
+            .partial_cmp(&b.min_distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Count interface residues per chain.
     let mut chain_interface_counts = vec![0usize; num_chains];
@@ -307,12 +320,20 @@ pub fn analyze_binding_pockets(protein: &Protein, cutoff: f64) -> BindingPocketA
                 let mut found = false;
 
                 for latom in &ligand.atoms {
-                    if latom.element.trim() == "H" { continue; }
+                    if latom.element.trim() == "H" {
+                        continue;
+                    }
                     for ratom in &residue.atoms {
-                        if ratom.element.trim() == "H" { continue; }
+                        if ratom.element.trim() == "H" {
+                            continue;
+                        }
                         let d = dist_sq(latom.x, latom.y, latom.z, ratom.x, ratom.y, ratom.z);
-                        if d < min_d_sq { min_d_sq = d; }
-                        if d <= cutoff_sq { found = true; }
+                        if d < min_d_sq {
+                            min_d_sq = d;
+                        }
+                        if d <= cutoff_sq {
+                            found = true;
+                        }
                     }
                 }
 
@@ -329,7 +350,11 @@ pub fn analyze_binding_pockets(protein: &Protein, cutoff: f64) -> BindingPocketA
         }
     }
 
-    contacts.sort_by(|a, b| a.min_distance.partial_cmp(&b.min_distance).unwrap_or(std::cmp::Ordering::Equal));
+    contacts.sort_by(|a, b| {
+        a.min_distance
+            .partial_cmp(&b.min_distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     BindingPocketAnalysis { contacts, pockets }
 }
@@ -353,7 +378,10 @@ impl InterfaceAnalysis {
     }
 
     /// Convert interface residues to (chain_id, seq_num) pairs using the protein.
-    pub fn interface_residues_by_id_with_protein(&self, protein: &Protein) -> HashSet<(String, i32)> {
+    pub fn interface_residues_by_id_with_protein(
+        &self,
+        protein: &Protein,
+    ) -> HashSet<(String, i32)> {
         let mut set = HashSet::new();
         for &(chain_idx, res_idx) in &self.interface_residues {
             if let Some(chain) = protein.chains.get(chain_idx) {
@@ -398,13 +426,7 @@ impl InterfaceAnalysis {
             .iter()
             .enumerate()
             .filter(|(idx, _)| self.chain_interface_counts.get(*idx).copied().unwrap_or(0) > 0)
-            .map(|(idx, chain)| {
-                format!(
-                    "Chain {}: {}",
-                    chain.id,
-                    self.chain_interface_counts[idx]
-                )
-            })
+            .map(|(idx, chain)| format!("Chain {}: {}", chain.id, self.chain_interface_counts[idx]))
             .collect();
 
         lines.push(format!(
@@ -476,9 +498,13 @@ impl InterfaceAnalysis {
 
                 for (li, ligand) in protein.ligands.iter().enumerate() {
                     let pocket_size = bp.pockets.get(li).map(|p| p.len()).unwrap_or(0);
-                    if pocket_size == 0 { continue; }
+                    if pocket_size == 0 {
+                        continue;
+                    }
 
-                    let min_dist = bp.contacts.iter()
+                    let min_dist = bp
+                        .contacts
+                        .iter()
                         .filter(|c| c.ligand_idx == li)
                         .map(|c| c.min_distance)
                         .fold(f64::MAX, f64::min);
@@ -499,15 +525,25 @@ impl InterfaceAnalysis {
                     ));
 
                     // Top 3 closest residues
-                    let mut pocket_contacts: Vec<_> = bp.contacts.iter()
-                        .filter(|c| c.ligand_idx == li)
-                        .collect();
-                    pocket_contacts.sort_by(|a, b| a.min_distance.partial_cmp(&b.min_distance).unwrap_or(std::cmp::Ordering::Equal));
+                    let mut pocket_contacts: Vec<_> =
+                        bp.contacts.iter().filter(|c| c.ligand_idx == li).collect();
+                    pocket_contacts.sort_by(|a, b| {
+                        a.min_distance
+                            .partial_cmp(&b.min_distance)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
                     let top_n = 3.min(pocket_contacts.len());
-                    let labels: Vec<String> = pocket_contacts[..top_n].iter()
+                    let labels: Vec<String> = pocket_contacts[..top_n]
+                        .iter()
                         .map(|c| {
                             let res = &protein.chains[c.chain_idx].residues[c.residue_idx];
-                            format!("{}:{}{} ({:.1}\u{00C5})", protein.chains[c.chain_idx].id, res.name, res.seq_num, c.min_distance)
+                            format!(
+                                "{}:{}{} ({:.1}\u{00C5})",
+                                protein.chains[c.chain_idx].id,
+                                res.name,
+                                res.seq_num,
+                                c.min_distance
+                            )
                         })
                         .collect();
                     if !labels.is_empty() {
@@ -560,7 +596,7 @@ mod tests {
                 Chain {
                     id: "B".to_string(),
                     residues: vec![
-                        make_residue("ASP", 1, 3.0, 0.0, 0.0), // within 4.5 of A:ALA1
+                        make_residue("ASP", 1, 3.0, 0.0, 0.0),  // within 4.5 of A:ALA1
                         make_residue("LEU", 2, 20.0, 0.0, 0.0), // far away
                     ],
                     molecule_type: MoleculeType::Protein,
@@ -667,7 +703,10 @@ mod tests {
         };
 
         let analysis = analyze_interface(&protein, 4.5);
-        assert!(analysis.contacts.is_empty(), "hydrogen-only atoms must not produce contacts");
+        assert!(
+            analysis.contacts.is_empty(),
+            "hydrogen-only atoms must not produce contacts"
+        );
     }
 
     #[test]
@@ -719,7 +758,9 @@ mod tests {
             atoms: vec![Atom {
                 name: "FE".to_string(),
                 element: "Fe".to_string(),
-                x: 2.0, y: 0.0, z: 0.0,
+                x: 2.0,
+                y: 0.0,
+                z: 0.0,
                 b_factor: 0.0,
                 is_backbone: false,
                 is_hetero: true,
@@ -757,7 +798,9 @@ mod tests {
             atoms: vec![Atom {
                 name: "ZN".to_string(),
                 element: "Zn".to_string(),
-                x: 1.0, y: 0.0, z: 0.0,
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
                 b_factor: 0.0,
                 is_backbone: false,
                 is_hetero: true,
@@ -848,7 +891,10 @@ mod tests {
         );
         let interactions = classify_interactions(&protein, &contacts);
         assert_eq!(interactions.len(), 1);
-        assert_eq!(interactions[0].interaction_type, InteractionType::SaltBridge);
+        assert_eq!(
+            interactions[0].interaction_type,
+            InteractionType::SaltBridge
+        );
         assert!((interactions[0].distance - 3.5).abs() < 1e-9);
     }
 
@@ -914,7 +960,10 @@ mod tests {
         );
         let interactions = classify_interactions(&protein, &contacts);
         assert_eq!(interactions.len(), 1);
-        assert_eq!(interactions[0].interaction_type, InteractionType::SaltBridge);
+        assert_eq!(
+            interactions[0].interaction_type,
+            InteractionType::SaltBridge
+        );
     }
 
     // ---------------------------------------------------------------

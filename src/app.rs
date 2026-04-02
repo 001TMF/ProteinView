@@ -1,10 +1,16 @@
+use std::sync::mpsc;
+
 use ratatui_image::picker::Picker;
 
-use crate::model::interface::{analyze_interface, analyze_binding_pockets, InterfaceAnalysis};
+use crate::model::interface::{InterfaceAnalysis, analyze_binding_pockets, analyze_interface};
 use crate::model::protein::Protein;
 use crate::render::camera::Camera;
 use crate::render::color::{ColorScheme, ColorSchemeType};
-use crate::render::ribbon::{generate_ribbon_mesh, RibbonTriangle};
+use crate::render::ribbon::{RibbonTriangle, generate_ribbon_mesh};
+
+/// Structures with more residues than this threshold trigger performance
+/// optimizations (background interface analysis, backbone default, reduced LOD).
+pub const LARGE_STRUCTURE_THRESHOLD: usize = 5000;
 
 /// Visualization mode
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -81,6 +87,15 @@ impl ConnectionType {
     }
 }
 
+/// Configuration bundle for [`App::new`], replacing individual parameters
+/// to avoid too_many_arguments.
+pub struct AppConfig {
+    pub render_mode: RenderMode,
+    pub viz_mode: VizMode,
+    pub user_explicit_mode: bool,
+    pub color_override: Option<ColorSchemeType>,
+}
+
 /// Main application state
 pub struct App {
     pub protein: Protein,
@@ -116,23 +131,37 @@ pub struct App {
     /// When interface mode is active, we display Interface colors but
     /// preserve the user's chosen scheme so it can be restored on exit.
     saved_color_scheme_type: ColorSchemeType,
+    /// Whether interface analysis has been computed. For large structures
+    /// (> LARGE_STRUCTURE_THRESHOLD residues), computation starts on a
+    /// background thread at startup and completes before the user needs it.
+    /// If the user requests interface mode before computation completes,
+    /// the toggle is a no-op until the next frame.
+    interface_computed: bool,
+    /// Receiver for background interface analysis (large structures only).
+    interface_rx: Option<mpsc::Receiver<InterfaceAnalysis>>,
+    /// Cached result of `total_residues > LARGE_STRUCTURE_THRESHOLD`, set once
+    /// in `App::new` to avoid per-frame O(n) `residue_count()` calls.
+    pub is_large: bool,
 }
 
 impl App {
     pub fn new(
         mut protein: Protein,
-        render_mode: RenderMode,
+        config: AppConfig,
         term_cols: u16,
         term_rows: u16,
         picker: Picker,
-        color_override: Option<ColorSchemeType>,
-        viz_mode: VizMode,
     ) -> Self {
+        let AppConfig {
+            render_mode,
+            viz_mode,
+            user_explicit_mode,
+            color_override,
+        } = config;
         protein.center();
         // If user explicitly requested pLDDT via CLI, trust that even if
         // the heuristic disagrees.
-        let has_plddt = protein.has_plddt()
-            || color_override == Some(ColorSchemeType::Plddt);
+        let has_plddt = protein.has_plddt() || color_override == Some(ColorSchemeType::Plddt);
         let total_residues = protein.residue_count();
         let radius = protein.bounding_radius().max(1.0);
 
@@ -168,18 +197,62 @@ impl App {
         let mut camera = Camera::default();
         camera.zoom = auto_zoom;
 
-        // Pre-compute interface analysis (4.5A cutoff)
-        let interface_analysis = {
+        let is_large = total_residues > LARGE_STRUCTURE_THRESHOLD;
+
+        // For large structures, start interface analysis on a background thread
+        // so it's ready by the time the user presses 'f'.
+        let interface_rx = if is_large {
+            let bg_protein = protein.clone();
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let mut ia = analyze_interface(&bg_protein, 4.5);
+                if !bg_protein.ligands.is_empty() {
+                    ia.binding_pockets = Some(analyze_binding_pockets(&bg_protein, 4.5));
+                }
+                let _ = tx.send(ia);
+            });
+            // Interface analysis is running in the background — it'll be ready
+            // by the time the user presses 'f'.
+            Some(rx)
+        } else {
+            None
+        };
+
+        let (interface_analysis, interface_computed) = if is_large {
+            let empty = InterfaceAnalysis {
+                contacts: Vec::new(),
+                interface_residues: std::collections::HashSet::new(),
+                chain_interface_counts: vec![0; protein.chains.len()],
+                total_interface_residues: 0,
+                binding_pockets: None,
+                interactions: Vec::new(),
+            };
+            (empty, false)
+        } else {
             let mut ia = analyze_interface(&protein, 4.5);
             if !protein.ligands.is_empty() {
                 ia.binding_pockets = Some(analyze_binding_pockets(&protein, 4.5));
             }
-            ia
+            (ia, true)
+        };
+
+        // For large structures, default to Backbone mode for instant
+        // interactivity — but only if the user didn't explicitly choose a mode.
+        let viz_mode = if is_large && !user_explicit_mode && viz_mode == VizMode::Cartoon {
+            VizMode::Backbone
+        } else {
+            viz_mode
         };
 
         let initial_scheme = color_override.unwrap_or(ColorSchemeType::Structure);
         let color_scheme = ColorScheme::new(initial_scheme, total_residues);
-        let mesh_cache = generate_ribbon_mesh(&protein, &color_scheme);
+        // Only build ribbon mesh eagerly if we're actually in Cartoon mode.
+        // For Backbone/Wireframe, defer until the user switches to Cartoon.
+        let (mesh_cache, mesh_dirty) = if viz_mode == VizMode::Cartoon {
+            (generate_ribbon_mesh(&protein, &color_scheme), false)
+        } else {
+            (Vec::new(), true)
+        };
 
         let connection_type = ConnectionType::detect();
 
@@ -198,13 +271,16 @@ impl App {
             should_quit: false,
             has_plddt,
             mesh_cache,
-            mesh_dirty: false,
+            mesh_dirty,
             picker,
             connection_type,
             ssh_hd_warning: false,
             ssh_hd_warning_frames: 0,
             needs_clear: false,
             saved_color_scheme_type: initial_scheme,
+            interface_computed,
+            interface_rx,
+            is_large,
         }
     }
 
@@ -217,6 +293,37 @@ impl App {
             let next = self.color_scheme.scheme_type.next(self.has_plddt);
             self.color_scheme = ColorScheme::new(next, self.protein.residue_count());
             self.mesh_dirty = true;
+        }
+    }
+
+    /// Poll the background interface analysis thread (non-blocking).
+    /// Called each frame so results are absorbed as soon as they're ready.
+    pub fn poll_background_interface(&mut self) {
+        if self.interface_computed {
+            return;
+        }
+        if let Some(rx) = &self.interface_rx {
+            match rx.try_recv() {
+                Ok(ia) => {
+                    self.interface_analysis = ia;
+                    self.interface_computed = true;
+                    self.interface_rx = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    // Still computing — nothing to do yet.
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Background thread panicked or dropped the sender.
+                    // Drop the rx and fall back to synchronous computation.
+                    self.interface_rx = None;
+                    let mut ia = analyze_interface(&self.protein, 4.5);
+                    if !self.protein.ligands.is_empty() {
+                        ia.binding_pockets = Some(analyze_binding_pockets(&self.protein, 4.5));
+                    }
+                    self.interface_analysis = ia;
+                    self.interface_computed = true;
+                }
+            }
         }
     }
 
@@ -237,16 +344,51 @@ impl App {
     pub fn toggle_interface(&mut self) {
         self.show_interface = !self.show_interface;
         if self.show_interface {
+            // Check if background analysis is ready, otherwise compute synchronously.
+            if !self.interface_computed {
+                // Determine background thread status without holding a
+                // long-lived borrow on self.interface_rx.
+                let bg_status = self.interface_rx.as_ref().map(|rx| rx.try_recv());
+                match bg_status {
+                    Some(Ok(ia)) => {
+                        self.interface_analysis = ia;
+                        self.interface_computed = true;
+                        self.interface_rx = None;
+                    }
+                    Some(Err(mpsc::TryRecvError::Empty)) => {
+                        // Still computing — don't enter interface mode yet.
+                        // poll_background_interface() will absorb the result
+                        // when ready; the user can press `f` again.
+                        self.show_interface = false;
+                        return;
+                    }
+                    Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                        // Thread panicked — drop the rx and fall through to
+                        // synchronous computation below.
+                        self.interface_rx = None;
+                    }
+                    None => {
+                        // No background thread was spawned.
+                    }
+                }
+                // If we still don't have it (no rx, or disconnected), compute synchronously.
+                if !self.interface_computed {
+                    let mut ia = analyze_interface(&self.protein, 4.5);
+                    if !self.protein.ligands.is_empty() {
+                        ia.binding_pockets = Some(analyze_binding_pockets(&self.protein, 4.5));
+                    }
+                    self.interface_analysis = ia;
+                    self.interface_computed = true;
+                }
+            }
             // Save the user's current color scheme before switching to Interface
             self.saved_color_scheme_type = self.color_scheme.scheme_type;
             self.rebuild_interface_colors();
         } else {
             self.show_interactions = false;
             // Restore the user's saved color scheme instead of hardcoding Structure
-            self.color_scheme = ColorScheme::new(
-                self.saved_color_scheme_type,
-                self.protein.residue_count(),
-            );
+            self.color_scheme =
+                ColorScheme::new(self.saved_color_scheme_type, self.protein.residue_count());
             self.mesh_dirty = true;
         }
     }
@@ -294,6 +436,13 @@ impl App {
 
     pub fn chain_names(&self) -> Vec<String> {
         self.protein.chains.iter().map(|c| c.id.clone()).collect()
+    }
+
+    /// Returns `true` when the scene is being actively animated (e.g. auto-rotate).
+    /// Used to trigger half-resolution rendering in FullHD mode for smoother
+    /// frame rates on large structures.
+    pub fn is_interacting(&self) -> bool {
+        self.camera.auto_rotate
     }
 
     pub fn tick(&mut self) {
@@ -367,9 +516,7 @@ impl App {
 
         self.needs_clear = true;
 
-        if self.render_mode == RenderMode::FullHD
-            && self.connection_type == ConnectionType::Ssh
-        {
+        if self.render_mode == RenderMode::FullHD && self.connection_type == ConnectionType::Ssh {
             self.ssh_hd_warning = true;
             self.ssh_hd_warning_frames = 90;
         } else {

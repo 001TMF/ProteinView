@@ -1,6 +1,11 @@
+use crate::model::protein::{
+    Atom, COMMON_IONS, Chain, DNA_RESIDUES, Ligand, LigandType, MoleculeType, Protein,
+    RNA_RESIDUES, Residue, SecondaryStructure, WATER_NAMES,
+};
+use crate::model::secondary::{
+    assign_from_cif_file, assign_from_pdb_file, infer_secondary_structure,
+};
 use anyhow::Result;
-use crate::model::protein::{Protein, Chain, MoleculeType, Residue, Atom, SecondaryStructure, RNA_RESIDUES, DNA_RESIDUES, Ligand, LigandType, WATER_NAMES, COMMON_IONS};
-use crate::model::secondary::{assign_from_pdb_file, assign_from_cif_file, infer_secondary_structure};
 
 /// Load a protein structure from a PDB or mmCIF file
 pub fn load_structure(path: &str) -> Result<Protein> {
@@ -34,16 +39,22 @@ pub fn load_structure(path: &str) -> Result<Protein> {
                 continue;
             }
 
-            let atoms: Vec<Atom> = pdbtbx_atoms.iter().map(|atom| Atom {
-                name: atom.name().to_string(),
-                element: atom.element().map(|e| format!("{:?}", e)).unwrap_or_default(),
-                x: atom.x(),
-                y: atom.y(),
-                z: atom.z(),
-                b_factor: atom.b_factor(),
-                is_backbone: atom.name() == "CA" || atom.name() == "C4'",
-                is_hetero: atom.hetero(),
-            }).collect();
+            let atoms: Vec<Atom> = pdbtbx_atoms
+                .iter()
+                .map(|atom| Atom {
+                    name: atom.name().to_string(),
+                    element: atom
+                        .element()
+                        .map(|e| format!("{:?}", e))
+                        .unwrap_or_default(),
+                    x: atom.x(),
+                    y: atom.y(),
+                    z: atom.z(),
+                    b_factor: atom.b_factor(),
+                    is_backbone: atom.name() == "CA" || atom.name() == "C4'",
+                    is_hetero: atom.hetero(),
+                })
+                .collect();
 
             if all_hetero {
                 // Classify as ion or ligand
@@ -79,14 +90,20 @@ pub fn load_structure(path: &str) -> Result<Protein> {
 
     let name = pdb.identifier.as_deref().unwrap_or("Unknown").to_string();
 
-    let mut protein = Protein { name, chains, ligands };
+    let mut protein = Protein {
+        name,
+        chains,
+        ligands,
+    };
 
     // Assign secondary structure from HELIX/SHEET records in the PDB file
     assign_from_pdb_file(&mut protein, path);
 
     // If all residues are still Coil (no PDB HELIX/SHEET records found),
     // try CIF _struct_conf/_struct_sheet_range parsing as a fallback.
-    let all_coil = protein.chains.iter()
+    let all_coil = protein
+        .chains
+        .iter()
         .flat_map(|c| &c.residues)
         .all(|r| r.secondary_structure == SecondaryStructure::Coil);
     if all_coil {
@@ -315,8 +332,7 @@ mod tests {
         // 2KGP is an NMR RNA structure with 10 MODEL records.
         // The parser should only load the first model, not duplicate
         // chains/atoms across all 10 models.
-        let protein = load_structure("examples/2KGP.pdb")
-            .expect("Failed to load 2KGP.pdb");
+        let protein = load_structure("examples/2KGP.pdb").expect("Failed to load 2KGP.pdb");
 
         // Should have exactly 1 chain (not 10 duplicated chains)
         assert_eq!(
@@ -347,8 +363,7 @@ mod tests {
     fn test_single_model_pdb_unaffected() {
         // 1UBQ is a single-model X-ray protein structure (ubiquitin).
         // Verify it still loads correctly after NMR multi-model handling.
-        let protein = load_structure("examples/1UBQ.pdb")
-            .expect("Failed to load 1UBQ.pdb");
+        let protein = load_structure("examples/1UBQ.pdb").expect("Failed to load 1UBQ.pdb");
 
         // Ubiquitin has 1 chain (chain A)
         assert_eq!(
@@ -375,8 +390,7 @@ mod tests {
         // 1UBQ has 76 amino acid residues and ~58 HOH waters.
         // After filtering, only the 76 AA residues should remain in chains,
         // and no ligands should be present (HOH is discarded, not a ligand).
-        let protein = load_structure("examples/1UBQ.pdb")
-            .expect("Failed to load 1UBQ.pdb");
+        let protein = load_structure("examples/1UBQ.pdb").expect("Failed to load 1UBQ.pdb");
 
         let residue_count = protein.residue_count();
         assert!(
@@ -397,8 +411,7 @@ mod tests {
     #[test]
     fn test_4hhb_ligand_parsing() {
         // 4HHB is hemoglobin with 4 HEM (heme) ligands and ions
-        let protein = load_structure("examples/4HHB.pdb")
-            .expect("Failed to load 4HHB.pdb");
+        let protein = load_structure("examples/4HHB.pdb").expect("Failed to load 4HHB.pdb");
 
         // Should have 4 protein chains
         assert_eq!(protein.chains.len(), 4);
@@ -407,14 +420,20 @@ mod tests {
         assert!(protein.ligand_count() > 0, "4HHB should have ligands");
 
         // At least the 4 HEM groups should be present
-        let hem_count = protein.ligands.iter()
-            .filter(|l| l.name == "HEM")
-            .count();
-        assert!(hem_count >= 4, "Expected at least 4 HEM ligands, got {}", hem_count);
+        let hem_count = protein.ligands.iter().filter(|l| l.name == "HEM").count();
+        assert!(
+            hem_count >= 4,
+            "Expected at least 4 HEM ligands, got {}",
+            hem_count
+        );
 
         // HEM should be classified as Ligand (not Ion) since it's multi-atom
         for l in protein.ligands.iter().filter(|l| l.name == "HEM") {
-            assert_eq!(l.ligand_type, LigandType::Ligand, "HEM should be Ligand type");
+            assert_eq!(
+                l.ligand_type,
+                LigandType::Ligand,
+                "HEM should be Ligand type"
+            );
         }
     }
 
@@ -425,6 +444,9 @@ mod tests {
         assert!(COMMON_IONS.contains(&"MG"), "MG should be a common ion");
         assert!(COMMON_IONS.contains(&"CA"), "CA should be a common ion");
         // ATP is not a single-atom ion
-        assert!(!COMMON_IONS.contains(&"ATP"), "ATP should not be a common ion");
+        assert!(
+            !COMMON_IONS.contains(&"ATP"),
+            "ATP should not be a common ion"
+        );
     }
 }

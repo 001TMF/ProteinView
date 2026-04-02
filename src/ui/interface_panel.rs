@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Frame;
 
 /// Width of the interface sidebar in columns.
 pub const SIDEBAR_WIDTH: u16 = 32;
@@ -96,7 +96,10 @@ pub fn render_interface_panel(
         Span::styled(" Ag other", Style::default().fg(Color::DarkGray)),
     ]));
 
-    if summary_lines.iter().any(|l| l.contains("Ligand") || l.contains("Ion")) {
+    if summary_lines
+        .iter()
+        .any(|l| l.contains("Ligand") || l.contains("Ion"))
+    {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled(" ", Style::default()),
@@ -116,27 +119,41 @@ pub fn render_interface_panel(
         let (hbonds, salt_bridges, hydrophobic, other) = interaction_counts;
         lines.push(Line::from(Span::styled(
             " Interactions",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(vec![
             Span::styled(" ", Style::default()),
             Span::styled("\u{2588}", Style::default().fg(Color::Rgb(0, 220, 255))),
-            Span::styled(format!(" H-bond: {}", hbonds), Style::default().fg(Color::White)),
+            Span::styled(
+                format!(" H-bond: {}", hbonds),
+                Style::default().fg(Color::White),
+            ),
         ]));
         lines.push(Line::from(vec![
             Span::styled(" ", Style::default()),
             Span::styled("\u{2588}", Style::default().fg(Color::Rgb(255, 80, 80))),
-            Span::styled(format!(" Salt bridge: {}", salt_bridges), Style::default().fg(Color::White)),
+            Span::styled(
+                format!(" Salt bridge: {}", salt_bridges),
+                Style::default().fg(Color::White),
+            ),
         ]));
         lines.push(Line::from(vec![
             Span::styled(" ", Style::default()),
             Span::styled("\u{2588}", Style::default().fg(Color::Rgb(220, 200, 60))),
-            Span::styled(format!(" Hydrophobic: {}", hydrophobic), Style::default().fg(Color::White)),
+            Span::styled(
+                format!(" Hydrophobic: {}", hydrophobic),
+                Style::default().fg(Color::White),
+            ),
         ]));
         lines.push(Line::from(vec![
             Span::styled(" ", Style::default()),
             Span::styled("\u{2588}", Style::default().fg(Color::Rgb(160, 160, 160))),
-            Span::styled(format!(" Other: {}", other), Style::default().fg(Color::White)),
+            Span::styled(
+                format!(" Other: {}", other),
+                Style::default().fg(Color::White),
+            ),
         ]));
     } else {
         lines.push(Line::from(Span::styled(

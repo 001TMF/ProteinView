@@ -21,6 +21,7 @@ pub struct Framebuffer {
 }
 
 /// A triangle in screen space, ready for rasterization.
+#[allow(dead_code)]
 pub struct Triangle {
     /// Three vertices in screen-space [x, y, z].
     /// x,y are pixel coordinates; z is depth for z-buffering.
@@ -69,15 +70,8 @@ impl Framebuffer {
         }
     }
 
-    /// Rasterize a single triangle with Lambert shading and z-buffering.
-    ///
-    /// `light_dir` should be a *unit* vector pointing toward the light source.
-    /// The triangle's `normal` is expected to be a unit vector as well.
-    ///
-    /// Shading: `intensity = max(ambient, dot(normal, light_dir))` where
-    /// ambient = 0.15. Each color channel is scaled by the intensity.
-    ///
     /// Convenience wrapper around `rasterize_triangle_depth` for tests.
+    /// See that method for shading details.
     #[cfg(test)]
     pub fn rasterize_triangle(&mut self, tri: &Triangle, light_dir: [f64; 3]) {
         self.rasterize_triangle_depth(tri, light_dir);
@@ -90,11 +84,8 @@ impl Framebuffer {
     ///
     /// Shading uses two-sided half-Lambert wrap lighting with an ambient term.
     /// Depth fog is handled separately via [`apply_depth_tint`] as a post-pass.
-    pub fn rasterize_triangle_depth(
-        &mut self,
-        tri: &Triangle,
-        light_dir: [f64; 3],
-    ) {
+    #[allow(dead_code)]
+    pub fn rasterize_triangle_depth(&mut self, tri: &Triangle, light_dir: [f64; 3]) {
         const AMBIENT: f64 = 0.55;
 
         // --- Two-sided Lambert shading with wrap lighting ---
@@ -141,19 +132,29 @@ impl Framebuffer {
         }
         let inv_denom = 1.0 / denom;
 
+        // --- Precompute x-step and y-offset terms for barycentric coords ---
+        // u = u_x_step * (pf_x - v2[0]) + u_y
+        // v = v_x_step * (pf_x - v2[0]) + v_y
+        // where u_y, v_y depend only on pf_y (constant per scanline).
+        let u_x_step = (v1[1] - v2[1]) * inv_denom;
+        let v_x_step = (v2[1] - v0[1]) * inv_denom;
+        let u_y_coeff = (v2[0] - v1[0]) * inv_denom;
+        let v_y_coeff = (v0[0] - v2[0]) * inv_denom;
+
         // --- Rasterize pixels in bounding box ---
         for py in min_y..=max_y {
             let pf_y = py as f64 + 0.5; // pixel center
+            let dy = pf_y - v2[1];
+            let u_y = u_y_coeff * dy;
+            let v_y = v_y_coeff * dy;
+
             for px in min_x..=max_x {
                 let pf_x = px as f64 + 0.5; // pixel center
+                let dx = pf_x - v2[0];
 
-                // Barycentric coordinates
-                let u =
-                    ((v1[1] - v2[1]) * (pf_x - v2[0]) + (v2[0] - v1[0]) * (pf_y - v2[1]))
-                        * inv_denom;
-                let v =
-                    ((v2[1] - v0[1]) * (pf_x - v2[0]) + (v0[0] - v2[0]) * (pf_y - v2[1]))
-                        * inv_denom;
+                // Barycentric coordinates (hoisted: 3 muls + 3 adds vs 8 muls + 6 adds)
+                let u = u_x_step * dx + u_y;
+                let v = v_x_step * dx + v_y;
                 let w = 1.0 - u - v;
 
                 // Inside test (with a tiny epsilon for edge cases)
@@ -169,7 +170,7 @@ impl Framebuffer {
     /// Apply a depth-based color tint to all rasterized pixels in the framebuffer.
     ///
     /// This is a post-pass that runs after all geometry has been rasterized.
-    /// For each pixel with a valid depth (not `f64::INFINITY`), its color is
+    /// For each pixel with a valid depth (not `f32::INFINITY`), its color is
     /// lerped toward `fog_color` based on how far it is from the camera:
     ///
     /// - Nearest pixels (z == z_min) keep their original color
@@ -183,8 +184,12 @@ impl Framebuffer {
         let mut z_max = f32::NEG_INFINITY;
         for &d in &self.depth {
             if d < f32::INFINITY {
-                if d < z_min { z_min = d; }
-                if d > z_max { z_max = d; }
+                if d < z_min {
+                    z_min = d;
+                }
+                if d > z_max {
+                    z_max = d;
+                }
             }
         }
 
@@ -204,9 +209,12 @@ impl Framebuffer {
             let t = ((d - z_min) * inv_range).clamp(0.0, 1.0);
             let blend = t as f64 * fog_strength;
             let c = &mut self.color[i];
-            c[0] = (c[0] as f64 + (fog_color[0] as f64 - c[0] as f64) * blend).clamp(0.0, 255.0) as u8;
-            c[1] = (c[1] as f64 + (fog_color[1] as f64 - c[1] as f64) * blend).clamp(0.0, 255.0) as u8;
-            c[2] = (c[2] as f64 + (fog_color[2] as f64 - c[2] as f64) * blend).clamp(0.0, 255.0) as u8;
+            c[0] =
+                (c[0] as f64 + (fog_color[0] as f64 - c[0] as f64) * blend).clamp(0.0, 255.0) as u8;
+            c[1] =
+                (c[1] as f64 + (fog_color[1] as f64 - c[1] as f64) * blend).clamp(0.0, 255.0) as u8;
+            c[2] =
+                (c[2] as f64 + (fog_color[2] as f64 - c[2] as f64) * blend).clamp(0.0, 255.0) as u8;
         }
     }
 
@@ -217,10 +225,10 @@ impl Framebuffer {
     fn clip_line_3d(&self, p1: [f64; 3], p2: [f64; 3]) -> Option<([f64; 3], [f64; 3])> {
         // Outcode bit flags
         const INSIDE: u8 = 0b0000;
-        const LEFT:   u8 = 0b0001;
-        const RIGHT:  u8 = 0b0010;
+        const LEFT: u8 = 0b0001;
+        const RIGHT: u8 = 0b0010;
         const BOTTOM: u8 = 0b0100;
-        const TOP:    u8 = 0b1000;
+        const TOP: u8 = 0b1000;
 
         let x_min = 0.0_f64;
         let y_min = 0.0_f64;
@@ -229,10 +237,16 @@ impl Framebuffer {
 
         let outcode = |x: f64, y: f64| -> u8 {
             let mut code = INSIDE;
-            if x < x_min { code |= LEFT; }
-            else if x > x_max { code |= RIGHT; }
-            if y < y_min { code |= TOP; }
-            else if y > y_max { code |= BOTTOM; }
+            if x < x_min {
+                code |= LEFT;
+            } else if x > x_max {
+                code |= RIGHT;
+            }
+            if y < y_min {
+                code |= TOP;
+            } else if y > y_max {
+                code |= BOTTOM;
+            }
             code
         };
 
@@ -540,7 +554,11 @@ impl Framebuffer {
             for x in 0..self.width {
                 let idx = y * self.width + x;
                 let c = self.color[idx];
-                let alpha = if self.depth[idx] >= f32::INFINITY { 0 } else { 255 };
+                let alpha = if self.depth[idx] >= f32::INFINITY {
+                    0
+                } else {
+                    255
+                };
                 img.put_pixel(x as u32, y as u32, image::Rgba([c[0], c[1], c[2], alpha]));
             }
         }
@@ -554,9 +572,13 @@ impl Framebuffer {
     /// callers can submit multiple concentric circles with varying z.
     pub fn draw_circle_z(&mut self, cx: f64, cy: f64, z: f64, radius: f64, color: [u8; 3]) {
         let ix_min = ((cx - radius).floor() as isize).max(0) as usize;
-        let ix_max = ((cx + radius).ceil() as isize).max(0).min(self.width as isize - 1) as usize;
+        let ix_max = ((cx + radius).ceil() as isize)
+            .max(0)
+            .min(self.width as isize - 1) as usize;
         let iy_min = ((cy - radius).floor() as isize).max(0) as usize;
-        let iy_max = ((cy + radius).ceil() as isize).max(0).min(self.height as isize - 1) as usize;
+        let iy_max = ((cy + radius).ceil() as isize)
+            .max(0)
+            .min(self.height as isize - 1) as usize;
 
         // Circle entirely off-screen
         if ix_min > ix_max || iy_min > iy_max {
@@ -657,23 +679,28 @@ pub fn framebuffer_to_widget(fb: &Framebuffer) -> Paragraph<'static> {
         // Case 2: top only → '▀' with fg=top, bg=Reset
         // Case 3: bottom only → '▄' with fg=bottom, bg=Reset
         #[derive(PartialEq, Clone, Copy)]
-        enum CellKind { Blank, Both([u8;3],[u8;3]), TopOnly([u8;3]), BotOnly([u8;3]) }
+        enum CellKind {
+            Blank,
+            Both([u8; 3], [u8; 3]),
+            TopOnly([u8; 3]),
+            BotOnly([u8; 3]),
+        }
 
         let mut run_text = String::new();
         let mut run_kind = CellKind::Blank;
         let mut run_started = false;
 
         let flush = |spans: &mut Vec<Span<'static>>, text: &str, kind: &CellKind| {
-            if text.is_empty() { return; }
+            if text.is_empty() {
+                return;
+            }
             let style = match kind {
                 CellKind::Blank => Style::default(),
                 CellKind::Both(top, bot) => Style::default()
                     .fg(Color::Rgb(top[0], top[1], top[2]))
                     .bg(Color::Rgb(bot[0], bot[1], bot[2])),
-                CellKind::TopOnly(top) => Style::default()
-                    .fg(Color::Rgb(top[0], top[1], top[2])),
-                CellKind::BotOnly(bot) => Style::default()
-                    .fg(Color::Rgb(bot[0], bot[1], bot[2])),
+                CellKind::TopOnly(top) => Style::default().fg(Color::Rgb(top[0], top[1], top[2])),
+                CellKind::BotOnly(bot) => Style::default().fg(Color::Rgb(bot[0], bot[1], bot[2])),
             };
             spans.push(Span::styled(text.to_string(), style));
         };
@@ -748,8 +775,8 @@ pub fn framebuffer_to_widget(fb: &Framebuffer) -> Paragraph<'static> {
 /// run-length merging at the expense of color precision.
 pub fn framebuffer_to_braille_widget(fb: &Framebuffer) -> Paragraph<'static> {
     // Terminal cell grid dimensions derived from the framebuffer.
-    let term_cols = (fb.width + 1) / 2;
-    let term_rows = (fb.height + 3) / 4;
+    let term_cols = fb.width.div_ceil(2);
+    let term_rows = fb.height.div_ceil(4);
 
     if term_cols == 0 || term_rows == 0 {
         return Paragraph::new("");
@@ -780,17 +807,16 @@ pub fn framebuffer_to_braille_widget(fb: &Framebuffer) -> Paragraph<'static> {
         let mut run_color: Option<[u8; 3]> = None;
         let mut run_started = false;
 
-        let flush =
-            |spans: &mut Vec<Span<'static>>, text: &str, color: &Option<[u8; 3]>| {
-                if text.is_empty() {
-                    return;
-                }
-                let style = match color {
-                    Some(c) => Style::default().fg(Color::Rgb(c[0], c[1], c[2])),
-                    None => Style::default(),
-                };
-                spans.push(Span::styled(text.to_string(), style));
+        let flush = |spans: &mut Vec<Span<'static>>, text: &str, color: &Option<[u8; 3]>| {
+            if text.is_empty() {
+                return;
+            }
+            let style = match color {
+                Some(c) => Style::default().fg(Color::Rgb(c[0], c[1], c[2])),
+                None => Style::default(),
             };
+            spans.push(Span::styled(text.to_string(), style));
+        };
 
         for tc in 0..term_cols {
             let px_base = tc * 2;
@@ -802,19 +828,19 @@ pub fn framebuffer_to_braille_widget(fb: &Framebuffer) -> Paragraph<'static> {
             let mut b_sum: u32 = 0;
             let mut on_count: u32 = 0;
 
-            for dx in 0..2usize {
+            for (dx, col_bits) in BRAILLE_BITS.iter().enumerate() {
                 let px = px_base + dx;
                 if px >= fb.width {
                     continue;
                 }
-                for dy in 0..4usize {
+                for (dy, &bit) in col_bits.iter().enumerate() {
                     let py = py_base + dy;
                     if py >= fb.height {
                         continue;
                     }
                     let c = fb.color[py * fb.width + px];
                     if c != [0, 0, 0] {
-                        bits |= BRAILLE_BITS[dx][dy];
+                        bits |= bit;
                         r_sum += c[0] as u32;
                         g_sum += c[1] as u32;
                         b_sum += c[2] as u32;
@@ -849,8 +875,7 @@ pub fn framebuffer_to_braille_widget(fb: &Framebuffer) -> Paragraph<'static> {
                 );
                 let cell_color = Some(avg);
 
-                let braille_char =
-                    char::from_u32(0x2800u32 + bits as u32).unwrap_or(' ');
+                let braille_char = char::from_u32(0x2800u32 + bits as u32).unwrap_or(' ');
 
                 if run_started && run_color == cell_color {
                     run_text.push(braille_char);
@@ -1013,10 +1038,18 @@ mod tests {
         assert_eq!(quantize_channel(128, 8), 128);
         // 255 should quantize to a valid u8 (256 clamped to 255)
         let q255 = quantize_channel(255, 8);
-        assert!(q255 == 248 || q255 == 255, "unexpected quantize(255, 8): {}", q255);
+        assert!(
+            q255 == 248 || q255 == 255,
+            "unexpected quantize(255, 8): {}",
+            q255
+        );
         // 252 should round up to 248 or be clamped
         let q252 = quantize_channel(252, 8);
-        assert!(q252 == 248 || q252 == 255, "unexpected quantize(252, 8): {}", q252);
+        assert!(
+            q252 == 248 || q252 == 255,
+            "unexpected quantize(252, 8): {}",
+            q252
+        );
     }
 
     #[test]
@@ -1057,14 +1090,21 @@ mod tests {
         fb.apply_depth_tint(fog, 0.5);
 
         // Near pixel (z=1, t=0.0) should stay unchanged
-        assert_eq!(fb.color[0], near_color, "nearest pixel should keep original color");
+        assert_eq!(
+            fb.color[0], near_color,
+            "nearest pixel should keep original color"
+        );
 
         // Far pixel (z=10, t=1.0) should be blended halfway toward fog
         // new = base + (fog - base) * 1.0 * 0.5
         // R: 200 + (40 - 200) * 0.5 = 200 - 80 = 120
         // G: 100 + (50 - 100) * 0.5 = 100 - 25 = 75
         // B:  50 + (70 -  50) * 0.5 =  50 + 10 = 60
-        assert_eq!(fb.color[1], [120, 75, 60], "farthest pixel should blend toward fog");
+        assert_eq!(
+            fb.color[1],
+            [120, 75, 60],
+            "farthest pixel should blend toward fog"
+        );
     }
 
     #[test]
@@ -1080,8 +1120,16 @@ mod tests {
         fb.apply_depth_tint([40, 50, 70], 0.5);
 
         // Background pixels must remain [0,0,0]
-        assert_eq!(fb.color[2], [0, 0, 0], "background pixel at index 2 should stay black");
-        assert_eq!(fb.color[3], [0, 0, 0], "background pixel at index 3 should stay black");
+        assert_eq!(
+            fb.color[2],
+            [0, 0, 0],
+            "background pixel at index 2 should stay black"
+        );
+        assert_eq!(
+            fb.color[3],
+            [0, 0, 0],
+            "background pixel at index 3 should stay black"
+        );
     }
 
     #[test]
@@ -1102,12 +1150,26 @@ mod tests {
     #[test]
     fn test_draw_dashed_line_3d_z_interpolation() {
         let mut fb = Framebuffer::new(10, 1);
-        fb.draw_dashed_line_3d([0.0, 0.0, 1.0], [9.0, 0.0, 10.0], [255, 255, 255], 100.0, 0.0);
+        fb.draw_dashed_line_3d(
+            [0.0, 0.0, 1.0],
+            [9.0, 0.0, 10.0],
+            [255, 255, 255],
+            100.0,
+            0.0,
+        );
 
         // With dash_len >> line length, all pixels should be drawn.
         // Check z interpolation: first pixel should be near 1.0, last near 10.0.
-        assert!((fb.depth[0] - 1.0).abs() < 0.5, "start depth should be near 1.0, got {}", fb.depth[0]);
-        assert!((fb.depth[9] - 10.0).abs() < 0.5, "end depth should be near 10.0, got {}", fb.depth[9]);
+        assert!(
+            (fb.depth[0] - 1.0).abs() < 0.5,
+            "start depth should be near 1.0, got {}",
+            fb.depth[0]
+        );
+        assert!(
+            (fb.depth[9] - 10.0).abs() < 0.5,
+            "end depth should be near 10.0, got {}",
+            fb.depth[9]
+        );
     }
 
     #[test]
@@ -1120,7 +1182,12 @@ mod tests {
 
         // All pixels should remain red (closer z wins)
         for i in 0..10 {
-            assert_eq!(fb.color[i], [255, 0, 0], "pixel {} should stay red (z-buffer)", i);
+            assert_eq!(
+                fb.color[i],
+                [255, 0, 0],
+                "pixel {} should stay red (z-buffer)",
+                i
+            );
         }
     }
 
@@ -1130,18 +1197,32 @@ mod tests {
         fb.draw_dashed_line_3d([0.0, 0.0, 1.0], [9.0, 9.0, 2.0], [128, 128, 128], 2.0, 2.0);
 
         // At least the first pixel should be drawn (start of first dash).
-        assert_ne!(fb.color[0], [0, 0, 0], "first pixel of diagonal dashed line should be drawn");
+        assert_ne!(
+            fb.color[0],
+            [0, 0, 0],
+            "first pixel of diagonal dashed line should be drawn"
+        );
 
         // Count total drawn pixels — should be roughly half of the diagonal length.
         let total_drawn: usize = fb.color.iter().filter(|c| **c != [0, 0, 0]).count();
-        assert!(total_drawn > 0 && total_drawn < 14, "diagonal should have partial coverage, got {}", total_drawn);
+        assert!(
+            total_drawn > 0 && total_drawn < 14,
+            "diagonal should have partial coverage, got {}",
+            total_drawn
+        );
     }
 
     #[test]
     fn test_draw_dashed_line_3d_offscreen_clipped() {
         let mut fb = Framebuffer::new(10, 10);
         // Both endpoints off the same side — should be silently skipped.
-        fb.draw_dashed_line_3d([-5.0, -5.0, 1.0], [-1.0, -1.0, 1.0], [255, 255, 255], 2.0, 1.0);
+        fb.draw_dashed_line_3d(
+            [-5.0, -5.0, 1.0],
+            [-1.0, -1.0, 1.0],
+            [255, 255, 255],
+            2.0,
+            1.0,
+        );
         let drawn: usize = fb.color.iter().filter(|c| **c != [0, 0, 0]).count();
         assert_eq!(drawn, 0, "fully off-screen dashed line should draw nothing");
     }
@@ -1155,11 +1236,21 @@ mod tests {
 
         // Every pixel along the horizontal line should be drawn (solid fallback).
         let drawn: usize = fb.color[..20].iter().filter(|c| **c != [0, 0, 0]).count();
-        assert_eq!(drawn, 20, "zero-cycle dashed line should draw solid (got {} pixels)", drawn);
+        assert_eq!(
+            drawn, 20,
+            "zero-cycle dashed line should draw solid (got {} pixels)",
+            drawn
+        );
 
         // Also verify z-interpolation is intact: endpoints should have expected depths.
-        assert!((fb.depth[0] - 1.0).abs() < 0.5, "start depth should be near 1.0");
-        assert!((fb.depth[19] - 2.0).abs() < 0.5, "end depth should be near 2.0");
+        assert!(
+            (fb.depth[0] - 1.0).abs() < 0.5,
+            "start depth should be near 1.0"
+        );
+        assert!(
+            (fb.depth[19] - 2.0).abs() < 0.5,
+            "end depth should be near 2.0"
+        );
     }
 
     #[test]
@@ -1169,6 +1260,10 @@ mod tests {
         fb.draw_dashed_line_3d([0.0, 0.0, 1.0], [9.0, 0.0, 1.0], [200, 100, 50], -1.0, 3.0);
 
         let drawn: usize = fb.color[..10].iter().filter(|c| **c != [0, 0, 0]).count();
-        assert_eq!(drawn, 10, "negative dash_len should draw solid (got {} pixels)", drawn);
+        assert_eq!(
+            drawn, 10,
+            "negative dash_len should draw solid (got {} pixels)",
+            drawn
+        );
     }
 }

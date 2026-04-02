@@ -27,9 +27,8 @@ pub const WATER_NAMES: &[&str] = &["HOH", "WAT", "DOD", "H2O", "OH2"];
 
 /// Common single-atom ions found as HETATM in PDB files.
 pub const COMMON_IONS: &[&str] = &[
-    "ZN", "MG", "CA", "FE", "MN", "CO", "CU", "NI", "CD",
-    "NA", "K", "CL", "BR", "I", "F",
-    "HG", "PT", "AU", "AG", "PB",
+    "ZN", "MG", "CA", "FE", "MN", "CO", "CU", "NI", "CD", "NA", "K", "CL", "BR", "I", "F", "HG",
+    "PT", "AU", "AG", "PB",
 ];
 
 /// Returns true if the residue name is a nucleotide (RNA or DNA).
@@ -121,7 +120,8 @@ impl Protein {
 
     /// Get total atom count
     pub fn atom_count(&self) -> usize {
-        self.chains.iter()
+        self.chains
+            .iter()
             .flat_map(|c| &c.residues)
             .flat_map(|r| &r.atoms)
             .count()
@@ -130,44 +130,49 @@ impl Protein {
 
     /// Get total residue count
     pub fn residue_count(&self) -> usize {
-        self.chains.iter()
-            .flat_map(|c| &c.residues)
-            .count()
+        self.chains.iter().flat_map(|c| &c.residues).count()
     }
 
     /// Get the bounding radius from origin (call after centering)
     pub fn bounding_radius(&self) -> f64 {
-        let chain_atoms = self.chains.iter()
+        let chain_atoms = self
+            .chains
+            .iter()
             .flat_map(|c| &c.residues)
             .flat_map(|r| &r.atoms)
             .filter(|a| a.is_backbone);
-        let ligand_atoms = self.ligands.iter()
-            .flat_map(|l| &l.atoms);
-        chain_atoms.map(|a| (a.x * a.x + a.y * a.y + a.z * a.z).sqrt())
+        let ligand_atoms = self.ligands.iter().flat_map(|l| &l.atoms);
+        chain_atoms
+            .map(|a| (a.x * a.x + a.y * a.y + a.z * a.z).sqrt())
             .chain(ligand_atoms.map(|a| (a.x * a.x + a.y * a.y + a.z * a.z).sqrt()))
             .fold(0.0f64, f64::max)
     }
 
     /// Center the protein at the origin
     pub fn center(&mut self) {
-        let chain_atoms: Vec<&Atom> = self.chains.iter()
+        let chain_atoms: Vec<&Atom> = self
+            .chains
+            .iter()
             .flat_map(|c| &c.residues)
             .flat_map(|r| &r.atoms)
             .collect();
-        let ligand_atoms: Vec<&Atom> = self.ligands.iter()
-            .flat_map(|l| &l.atoms)
-            .collect();
+        let ligand_atoms: Vec<&Atom> = self.ligands.iter().flat_map(|l| &l.atoms).collect();
 
         let total = chain_atoms.len() + ligand_atoms.len();
-        if total == 0 { return; }
+        if total == 0 {
+            return;
+        }
 
         let n = total as f64;
         let cx: f64 = (chain_atoms.iter().map(|a| a.x).sum::<f64>()
-            + ligand_atoms.iter().map(|a| a.x).sum::<f64>()) / n;
+            + ligand_atoms.iter().map(|a| a.x).sum::<f64>())
+            / n;
         let cy: f64 = (chain_atoms.iter().map(|a| a.y).sum::<f64>()
-            + ligand_atoms.iter().map(|a| a.y).sum::<f64>()) / n;
+            + ligand_atoms.iter().map(|a| a.y).sum::<f64>())
+            / n;
         let cz: f64 = (chain_atoms.iter().map(|a| a.z).sum::<f64>()
-            + ligand_atoms.iter().map(|a| a.z).sum::<f64>()) / n;
+            + ligand_atoms.iter().map(|a| a.z).sum::<f64>())
+            / n;
 
         for chain in &mut self.chains {
             for residue in &mut chain.residues {
@@ -254,7 +259,9 @@ mod tests {
         Atom {
             name: "CA".to_string(),
             element: "C".to_string(),
-            x: 0.0, y: 0.0, z: 0.0,
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
             b_factor: b,
             is_backbone: true,
             is_hetero: false,
@@ -267,12 +274,16 @@ mod tests {
             chains: vec![Chain {
                 id: "A".to_string(),
                 molecule_type: MoleculeType::Protein,
-                residues: values.iter().enumerate().map(|(i, &b)| Residue {
-                    name: "ALA".to_string(),
-                    seq_num: i as i32 + 1,
-                    atoms: vec![atom_with_bfactor(b)],
-                    secondary_structure: SecondaryStructure::Coil,
-                }).collect(),
+                residues: values
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &b)| Residue {
+                        name: "ALA".to_string(),
+                        seq_num: i as i32 + 1,
+                        atoms: vec![atom_with_bfactor(b)],
+                        secondary_structure: SecondaryStructure::Coil,
+                    })
+                    .collect(),
             }],
             ligands: vec![],
         }
@@ -281,18 +292,16 @@ mod tests {
     #[test]
     fn test_has_plddt_alphafold_like() {
         // Typical AlphaFold pLDDT scores: mostly high, all in [0,100]
-        let protein = protein_from_bfactors(&[
-            95.0, 92.0, 88.0, 76.0, 67.0, 54.0, 91.0, 85.0, 73.0, 80.0,
-        ]);
+        let protein =
+            protein_from_bfactors(&[95.0, 92.0, 88.0, 76.0, 67.0, 54.0, 91.0, 85.0, 73.0, 80.0]);
         assert!(protein.has_plddt());
     }
 
     #[test]
     fn test_has_plddt_crystallographic() {
         // Typical crystallographic B-factors: low values, wide range
-        let protein = protein_from_bfactors(&[
-            12.0, 18.0, 22.0, 30.0, 16.0, 25.0, 8.0, 14.0, 20.0, 35.0,
-        ]);
+        let protein =
+            protein_from_bfactors(&[12.0, 18.0, 22.0, 30.0, 16.0, 25.0, 8.0, 14.0, 20.0, 35.0]);
         assert!(!protein.has_plddt());
     }
 
@@ -309,18 +318,16 @@ mod tests {
     #[test]
     fn test_has_plddt_borderline_mean_below_threshold() {
         // Mean = 49.0, just below 50.0 threshold — should reject
-        let protein = protein_from_bfactors(&[
-            45.0, 42.0, 65.0, 48.0, 40.0, 55.0, 50.0, 38.0, 60.0, 47.0,
-        ]);
+        let protein =
+            protein_from_bfactors(&[45.0, 42.0, 65.0, 48.0, 40.0, 55.0, 50.0, 38.0, 60.0, 47.0]);
         assert!(!protein.has_plddt());
     }
 
     #[test]
     fn test_has_plddt_negative_bfactors() {
         // NMR structures can have negative B-factors — outside [0,100]
-        let protein = protein_from_bfactors(&[
-            -5.0, 80.0, 75.0, 90.0, 85.0, -2.0, 78.0, 92.0, 70.0, 88.0,
-        ]);
+        let protein =
+            protein_from_bfactors(&[-5.0, 80.0, 75.0, 90.0, 85.0, -2.0, 78.0, 92.0, 70.0, 88.0]);
         assert!(!protein.has_plddt());
     }
 }

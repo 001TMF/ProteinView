@@ -44,10 +44,7 @@ fn draw_thick_line(
 /// Check whether two atoms are bonded in 3D space.
 /// Returns true if they are in the same residue and within 1.9 Angstroms,
 /// or if they form a peptide bond (C of residue i to N of residue i+1 in same chain).
-fn atoms_bonded_3d(
-    a1_x: f64, a1_y: f64, a1_z: f64,
-    a2_x: f64, a2_y: f64, a2_z: f64,
-) -> bool {
+fn atoms_bonded_3d(a1_x: f64, a1_y: f64, a1_z: f64, a2_x: f64, a2_y: f64, a2_z: f64) -> bool {
     let dx = a2_x - a1_x;
     let dy = a2_y - a1_y;
     let dz = a2_z - a1_z;
@@ -59,6 +56,7 @@ fn atoms_bonded_3d(
 /// Behavior depends on VizMode:
 /// - Backbone/Cartoon: Connect C-alpha atoms with thick lines (5 offsets)
 /// - Wireframe: All atoms, thin single bond lines
+#[allow(clippy::too_many_arguments)]
 pub fn render_protein<'a>(
     protein: &'a Protein,
     camera: &'a Camera,
@@ -101,7 +99,9 @@ fn render_backbone(
     color_scheme: &ColorScheme,
 ) {
     let backbone = protein.backbone_atoms();
-    if backbone.is_empty() { return; }
+    if backbone.is_empty() {
+        return;
+    }
 
     // Perpendicular offsets: centre line + 2 offsets on each side
     let offsets: [f64; 5] = [0.0, 0.3, -0.3, 0.6, -0.6];
@@ -138,10 +138,14 @@ fn render_wireframe(
         for residue in &chain.residues {
             let atom_count = residue.atoms.len();
             // Project all atoms in this residue
-            let projected: Vec<_> = residue.atoms.iter().map(|a| {
-                let proj = camera.project(a.x, a.y, a.z);
-                (a, proj)
-            }).collect();
+            let projected: Vec<_> = residue
+                .atoms
+                .iter()
+                .map(|a| {
+                    let proj = camera.project(a.x, a.y, a.z);
+                    (a, proj)
+                })
+                .collect();
 
             // Intra-residue bonds: check all atom pairs within the residue
             for i in 0..atom_count {
@@ -203,13 +207,27 @@ fn render_ligands(
                     let proj = camera.project(atom.x, atom.y, atom.z);
                     let color = color_scheme.ligand_atom_color(atom, ligand);
                     let sz = 0.5;
-                    ctx.draw(&Line { x1: proj.x - sz, y1: proj.y, x2: proj.x + sz, y2: proj.y, color });
-                    ctx.draw(&Line { x1: proj.x, y1: proj.y - sz, x2: proj.x, y2: proj.y + sz, color });
+                    ctx.draw(&Line {
+                        x1: proj.x - sz,
+                        y1: proj.y,
+                        x2: proj.x + sz,
+                        y2: proj.y,
+                        color,
+                    });
+                    ctx.draw(&Line {
+                        x1: proj.x,
+                        y1: proj.y - sz,
+                        x2: proj.x,
+                        y2: proj.y + sz,
+                        color,
+                    });
                 }
             }
             LigandType::Ligand => {
                 // Project all atoms
-                let projected: Vec<_> = ligand.atoms.iter()
+                let projected: Vec<_> = ligand
+                    .atoms
+                    .iter()
                     .map(|a| {
                         let proj = camera.project(a.x, a.y, a.z);
                         let color = color_scheme.ligand_atom_color(a, ligand);
@@ -235,10 +253,10 @@ fn render_ligands(
 /// Map interaction type to a ratatui color for braille rendering.
 fn braille_interaction_color(t: InteractionType) -> ratatui::style::Color {
     match t {
-        InteractionType::HydrogenBond => ratatui::style::Color::Rgb(0, 220, 255),       // cyan
-        InteractionType::SaltBridge => ratatui::style::Color::Rgb(255, 80, 80),          // red
+        InteractionType::HydrogenBond => ratatui::style::Color::Rgb(0, 220, 255), // cyan
+        InteractionType::SaltBridge => ratatui::style::Color::Rgb(255, 80, 80),   // red
         InteractionType::HydrophobicContact => ratatui::style::Color::Rgb(220, 200, 60), // yellow
-        InteractionType::Other => ratatui::style::Color::Rgb(160, 160, 160),             // gray
+        InteractionType::Other => ratatui::style::Color::Rgb(160, 160, 160),      // gray
     }
 }
 
@@ -246,14 +264,18 @@ fn braille_interaction_color(t: InteractionType) -> ratatui::style::Color {
 ///
 /// Uses solid lines (not dashed) because braille resolution is too low for
 /// dashes to be visually meaningful.
-fn render_interactions(
-    ctx: &mut Context<'_>,
-    interactions: &[Interaction],
-    camera: &Camera,
-) {
+fn render_interactions(ctx: &mut Context<'_>, interactions: &[Interaction], camera: &Camera) {
     for interaction in interactions {
-        let p1 = camera.project(interaction.atom_a[0], interaction.atom_a[1], interaction.atom_a[2]);
-        let p2 = camera.project(interaction.atom_b[0], interaction.atom_b[1], interaction.atom_b[2]);
+        let p1 = camera.project(
+            interaction.atom_a[0],
+            interaction.atom_a[1],
+            interaction.atom_a[2],
+        );
+        let p2 = camera.project(
+            interaction.atom_b[0],
+            interaction.atom_b[1],
+            interaction.atom_b[2],
+        );
         let color = braille_interaction_color(interaction.interaction_type);
         ctx.draw(&Line {
             x1: p1.x,

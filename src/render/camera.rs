@@ -102,13 +102,28 @@ impl Camera {
     const ZOOM_STEP: f64 = 0.1;
     const PAN_STEP: f64 = 2.0;
 
-    pub fn rotate_x(&mut self, dir: f64) { self.rot_x += dir * Self::ROT_STEP; }
-    pub fn rotate_y(&mut self, dir: f64) { self.rot_y -= dir * Self::ROT_STEP; }
-    pub fn rotate_z(&mut self, dir: f64) { self.rot_z -= dir * Self::ROT_STEP; }
-    pub fn zoom_in(&mut self) { self.zoom *= 1.0 + Self::ZOOM_STEP; }
-    pub fn zoom_out(&mut self) { self.zoom *= 1.0 - Self::ZOOM_STEP; }
-    pub fn pan(&mut self, dx: f64, dy: f64) { self.pan_x += dx * Self::PAN_STEP; self.pan_y += dy * Self::PAN_STEP; }
-    pub fn reset(&mut self) { *self = Self::default(); }
+    pub fn rotate_x(&mut self, dir: f64) {
+        self.rot_x += dir * Self::ROT_STEP;
+    }
+    pub fn rotate_y(&mut self, dir: f64) {
+        self.rot_y -= dir * Self::ROT_STEP;
+    }
+    pub fn rotate_z(&mut self, dir: f64) {
+        self.rot_z -= dir * Self::ROT_STEP;
+    }
+    pub fn zoom_in(&mut self) {
+        self.zoom *= 1.0 + Self::ZOOM_STEP;
+    }
+    pub fn zoom_out(&mut self) {
+        self.zoom *= 1.0 - Self::ZOOM_STEP;
+    }
+    pub fn pan(&mut self, dx: f64, dy: f64) {
+        self.pan_x += dx * Self::PAN_STEP;
+        self.pan_y += dy * Self::PAN_STEP;
+    }
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
 
     /// Auto-rotate speed in radians per second (~0.6 rad/s = one full turn in ~10s).
     const AUTO_ROTATE_SPEED: f64 = 0.6;
@@ -203,7 +218,10 @@ mod tests {
             "positive world-X should project to negative screen-X, got {}",
             p.x
         );
-        assert!((p.y).abs() < 1e-12, "Y should be zero for a point on the X axis");
+        assert!(
+            (p.y).abs() < 1e-12,
+            "Y should be zero for a point on the X axis"
+        );
     }
 
     #[test]
@@ -216,7 +234,10 @@ mod tests {
             "positive world-Y should project to positive screen-Y, got {}",
             p.y
         );
-        assert!((p.x).abs() < 1e-12, "X should be zero for a point on the Y axis");
+        assert!(
+            (p.x).abs() < 1e-12,
+            "X should be zero for a point on the Y axis"
+        );
     }
 
     #[test]
@@ -236,14 +257,22 @@ mod tests {
     fn rotate_y_produces_negative_delta() {
         let mut cam = Camera::default();
         cam.rotate_y(1.0);
-        assert!(cam.rot_y < 0.0, "rotate_y(+1) should decrease rot_y, got {}", cam.rot_y);
+        assert!(
+            cam.rot_y < 0.0,
+            "rotate_y(+1) should decrease rot_y, got {}",
+            cam.rot_y
+        );
     }
 
     #[test]
     fn rotate_z_produces_negative_delta() {
         let mut cam = Camera::default();
         cam.rotate_z(1.0);
-        assert!(cam.rot_z < 0.0, "rotate_z(+1) should decrease rot_z, got {}", cam.rot_z);
+        assert!(
+            cam.rot_z < 0.0,
+            "rotate_z(+1) should decrease rot_z, got {}",
+            cam.rot_z
+        );
     }
 
     #[test]

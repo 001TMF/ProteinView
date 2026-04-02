@@ -1,6 +1,6 @@
 use image::DynamicImage;
-use ratatui::layout::Rect;
 use ratatui::Frame;
+use ratatui::layout::Rect;
 use ratatui_image::picker::ProtocolType;
 use ratatui_image::{Image, Resize};
 
@@ -83,18 +83,19 @@ fn render_fullhd_viewport(frame: &mut Frame, area: Rect, app: &App, interactions
     // Even with parallel rasterization, half-res keeps frame rates smooth
     // on large structures.
     let is_graphics = proto != ProtocolType::Halfblocks && font_w > 0 && font_h > 0;
-    let is_large = app.protein.residue_count() > crate::app::LARGE_STRUCTURE_THRESHOLD;
-    let scale = if is_graphics && is_large && app.is_interacting() { 0.5 } else { 1.0 };
+    let is_large = app.is_large;
+    let scale = if is_graphics && is_large && app.is_interacting() {
+        0.5
+    } else {
+        1.0
+    };
     let (px_w, px_h) = if is_graphics {
         (
             area.width as f64 * font_w as f64 * scale,
             area.height as f64 * font_h as f64 * scale,
         )
     } else {
-        (
-            area.width as f64 * 2.0,
-            area.height as f64 * 4.0,
-        )
+        (area.width as f64 * 2.0, area.height as f64 * 4.0)
     };
 
     // Rasterize the 3D scene into a software framebuffer.
@@ -123,7 +124,7 @@ fn render_fullhd_viewport(frame: &mut Frame, area: Rect, app: &App, interactions
     // framebuffer to an image and send it.
     if proto != ProtocolType::Halfblocks {
         if proto == ProtocolType::Kitty {
-            // Use our custom PNG-compressed Kitty transmitter.
+            // Use our custom zlib-compressed Kitty transmitter.
             // This is ~10-20x smaller than ratatui-image's raw RGBA path,
             // making FullHD viable over SSH.
             let dyn_img = DynamicImage::ImageRgba8(fb.to_rgba_image());

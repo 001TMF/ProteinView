@@ -4,7 +4,10 @@ use anyhow::Result;
 pub fn fetch_pdb(pdb_id: &str) -> Result<String> {
     #[cfg(feature = "fetch")]
     {
-        let url = format!("https://files.rcsb.org/download/{}.cif", pdb_id.to_uppercase());
+        let url = format!(
+            "https://files.rcsb.org/download/{}.cif",
+            pdb_id.to_uppercase()
+        );
         let response = reqwest::blocking::get(&url)?;
         if !response.status().is_success() {
             anyhow::bail!("Failed to fetch PDB {}: HTTP {}", pdb_id, response.status());

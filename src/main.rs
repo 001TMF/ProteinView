@@ -5,20 +5,20 @@ mod parser;
 mod render;
 mod ui;
 
-use std::io;
-use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
 use anyhow::Result;
 use clap::Parser;
 use crossterm::{
     event::KeyCode,
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::prelude::*;
 use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::prelude::*;
+use std::io;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
-use app::{App, ConnectionType, RenderMode, VizMode};
+use app::{App, AppConfig, ConnectionType, RenderMode, VizMode};
 
 macro_rules! log {
     ($file:expr, $($arg:tt)*) => {
@@ -77,10 +77,13 @@ fn main() -> Result<()> {
     // only has ~60 tiles (64x64) so more threads hit diminishing returns,
     // and 4 leaves cores free for the terminal emulator and OS.
     let num_threads = cli.threads.max(1);
-    rayon::ThreadPoolBuilder::new()
+    match rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)
         .build_global()
-        .ok(); // Silently ignore if pool already initialized (e.g. by image crate).
+    {
+        Ok(()) => {}
+        Err(e) => eprintln!("Warning: failed to initialize rayon thread pool: {e}"),
+    }
 
     // Determine the file path
     let file_path = if let Some(pdb_id) = &cli.fetch {
@@ -94,7 +97,8 @@ fn main() -> Result<()> {
 
     // Load protein structure
     let protein = parser::pdb::load_structure(&file_path)?;
-    eprintln!("Loaded: {} ({} chains, {} residues, {} atoms{})",
+    eprintln!(
+        "Loaded: {} ({} chains, {} residues, {} atoms{})",
         protein.name,
         protein.chains.len(),
         protein.residue_count(),
@@ -107,9 +111,14 @@ fn main() -> Result<()> {
     );
 
     // Open log file if requested
-    let mut logfile: Option<std::fs::File> = cli.log.as_ref().map(|path| {
-        std::fs::File::create(path).expect("cannot create log file")
-    });
+    let mut logfile: Option<std::fs::File> = match &cli.log {
+        Some(path) => {
+            let f = std::fs::File::create(path)
+                .map_err(|e| anyhow::anyhow!("cannot create log file '{}': {}", path, e))?;
+            Some(f)
+        }
+        None => None,
+    };
 
     // Detect connection type
     let connection_type = ConnectionType::detect();
@@ -163,8 +172,12 @@ fn main() -> Result<()> {
     // input thread (which reads from stdin).
     let picker = ratatui_image::picker::Picker::from_query_stdio()
         .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
-    log!(logfile, "picker: protocol={:?} font_size={:?}",
-        picker.protocol_type(), picker.font_size());
+    log!(
+        logfile,
+        "picker: protocol={:?} font_size={:?}",
+        picker.protocol_type(),
+        picker.font_size()
+    );
 
     // Parse CLI color scheme override
     let color_override = match cli.color.to_ascii_lowercase().as_str() {
@@ -175,27 +188,50 @@ fn main() -> Result<()> {
         "rainbow" => Some(render::color::ColorSchemeType::Rainbow),
         "plddt" => Some(render::color::ColorSchemeType::Plddt),
         _ => {
-            eprintln!("Warning: unknown color scheme '{}', using structure", cli.color);
+            eprintln!(
+                "Warning: unknown color scheme '{}', using structure",
+                cli.color
+            );
             None
         }
     };
 
     // Parse CLI visualization mode override
-    let user_explicit_mode = cli.mode.to_ascii_lowercase() != "cartoon"
+    let user_explicit_mode = !cli.mode.eq_ignore_ascii_case("cartoon")
         || std::env::args().any(|a| a == "--mode" || a.starts_with("--mode="));
     let viz_mode = match cli.mode.to_ascii_lowercase().as_str() {
         "cartoon" => VizMode::Cartoon,
         "backbone" => VizMode::Backbone,
         "wireframe" => VizMode::Wireframe,
         _ => {
-            eprintln!("Warning: unknown visualization mode '{}', using cartoon", cli.mode);
+            eprintln!(
+                "Warning: unknown visualization mode '{}', using cartoon",
+                cli.mode
+            );
             VizMode::Cartoon
         }
     };
 
     // Create app with actual terminal dimensions for dynamic zoom
-    let mut app = App::new(protein, render_mode, term_cols, term_rows, picker, color_override, viz_mode, user_explicit_mode);
-    log!(logfile, "app created: render_mode={:?} chains={} zoom={:.2}", app.render_mode, app.protein.chains.len(), app.camera.zoom);
+    let mut app = App::new(
+        protein,
+        AppConfig {
+            render_mode,
+            viz_mode,
+            user_explicit_mode,
+            color_override,
+        },
+        term_cols,
+        term_rows,
+        picker,
+    );
+    log!(
+        logfile,
+        "app created: render_mode={:?} chains={} zoom={:.2}",
+        app.render_mode,
+        app.protein.chains.len(),
+        app.camera.zoom
+    );
 
     // Spawn dedicated input thread — decouples input from rendering so
     // quit always works even when HD rendering is slow
@@ -224,7 +260,13 @@ fn main() -> Result<()> {
                     log!(logfile, "key: {:?}", key.code);
                     match key.code {
                         KeyCode::Char('q') => app.should_quit = true,
-                        KeyCode::Char('c') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => app.should_quit = true,
+                        KeyCode::Char('c')
+                            if key
+                                .modifiers
+                                .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                        {
+                            app.should_quit = true
+                        }
                         KeyCode::Char('h') | KeyCode::Left => app.camera.rotate_y(-1.0),
                         KeyCode::Char('l') | KeyCode::Right => app.camera.rotate_y(1.0),
                         KeyCode::Char('j') | KeyCode::Down => app.camera.rotate_x(1.0),
@@ -238,20 +280,23 @@ fn main() -> Result<()> {
                         KeyCode::Char('a') => app.camera.pan(-1.0, 0.0),
                         KeyCode::Char('d') => app.camera.pan(1.0, 0.0),
                         KeyCode::Char('r') => {
-                            let (cols, rows) = crossterm::terminal::size().unwrap_or((term_cols, term_rows));
+                            let (cols, rows) =
+                                crossterm::terminal::size().unwrap_or((term_cols, term_rows));
                             app.camera.reset();
                             app.recalculate_zoom(cols, rows);
-                        },
+                        }
                         KeyCode::Char('c') => app.cycle_color(),
                         KeyCode::Char('v') => app.cycle_viz_mode(),
                         KeyCode::Char('m') => {
-                            let (cols, rows) = crossterm::terminal::size().unwrap_or((term_cols, term_rows));
+                            let (cols, rows) =
+                                crossterm::terminal::size().unwrap_or((term_cols, term_rows));
                             app.toggle_hd(cols, rows);
-                        },
+                        }
                         KeyCode::Char('M') => {
-                            let (cols, rows) = crossterm::terminal::size().unwrap_or((term_cols, term_rows));
+                            let (cols, rows) =
+                                crossterm::terminal::size().unwrap_or((term_cols, term_rows));
                             app.toggle_fullhd(cols, rows);
-                        },
+                        }
                         KeyCode::Char('[') => app.prev_chain(),
                         KeyCode::Char(']') => app.next_chain(),
                         KeyCode::Char(' ') => app.camera.auto_rotate = !app.camera.auto_rotate,
@@ -259,18 +304,29 @@ fn main() -> Result<()> {
                         KeyCode::Char('I') => app.toggle_interactions(),
                         KeyCode::Char('g') => app.toggle_ligands(),
                         KeyCode::Char('?') => app.show_help = !app.show_help,
-                        KeyCode::Esc => { if app.show_help { app.show_help = false; } },
+                        KeyCode::Esc => {
+                            if app.show_help {
+                                app.show_help = false;
+                            }
+                        }
                         _ => {}
                     }
                 }
             }
         }
 
-        if app.should_quit { break; }
+        if app.should_quit {
+            break;
+        }
 
         // Ensure ribbon mesh cache is fresh (rebuilds only when color scheme changes).
         // Must happen outside terminal.draw() since ribbon_mesh() needs &mut self.
-        app.ribbon_mesh();
+        // Only rebuild when in Cartoon mode — Backbone/Wireframe don't use the
+        // ribbon mesh, so skipping this preserves the lazy-mesh optimization for
+        // large structures that start in a non-Cartoon mode.
+        if app.viz_mode == VizMode::Cartoon {
+            app.ribbon_mesh();
+        }
 
         // Always poll the background interface thread, even during skipped
         // frames, so the result is absorbed as soon as it's available.
@@ -296,8 +352,15 @@ fn main() -> Result<()> {
         // Render
         frame_count += 1;
         if frame_count <= 3 || frame_count % 300 == 0 {
-            log!(logfile, "frame {} render start (render_mode={:?} viz={:?} interface={} last_draw={:?})",
-                frame_count, app.render_mode, app.viz_mode, app.show_interface, last_draw_duration);
+            log!(
+                logfile,
+                "frame {} render start (render_mode={:?} viz={:?} interface={} last_draw={:?})",
+                frame_count,
+                app.render_mode,
+                app.viz_mode,
+                app.show_interface,
+                last_draw_duration
+            );
         }
 
         // After a render-mode switch, force ratatui to redraw every cell.
@@ -344,10 +407,10 @@ fn main() -> Result<()> {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(1),     // Header
-                    Constraint::Min(3),        // Viewport
-                    Constraint::Length(2),      // Status bar
-                    Constraint::Length(1),      // Help bar
+                    Constraint::Length(1), // Header
+                    Constraint::Min(3),    // Viewport
+                    Constraint::Length(2), // Status bar
+                    Constraint::Length(1), // Help bar
                 ])
                 .split(main_area);
 

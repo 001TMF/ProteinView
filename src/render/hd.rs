@@ -2,8 +2,8 @@ use crate::app::VizMode;
 use crate::model::interface::{Interaction, InteractionType};
 use crate::model::protein::{LigandType, MoleculeType, Protein};
 use crate::render::camera::Camera;
-use crate::render::color::{color_to_rgb, ColorScheme};
-use crate::render::framebuffer::{default_light_dir, Framebuffer};
+use crate::render::color::{ColorScheme, color_to_rgb};
+use crate::render::framebuffer::{Framebuffer, default_light_dir};
 use crate::render::ribbon::RibbonTriangle;
 use rayon::prelude::*;
 
@@ -47,7 +47,14 @@ pub fn render_hd_framebuffer(
 
     match viz_mode {
         VizMode::Cartoon => {
-            render_cartoon_tiled(&mut fb, mesh, &cache, light_dir, half_w, half_h, px_w, px_h);
+            let ctx = TiledRenderCtx {
+                half_w,
+                half_h,
+                px_w,
+                px_h,
+                light_dir,
+            };
+            render_cartoon_tiled(&mut fb, mesh, &cache, &ctx);
         }
         VizMode::Backbone => {
             render_backbone_fb(&mut fb, protein, camera, color_scheme, half_w, half_h, ts);
@@ -74,7 +81,6 @@ pub fn render_hd_framebuffer(
 
     fb
 }
-
 
 /// Convert projected coords (centered at origin) to pixel coords (top-left origin).
 #[inline]
@@ -103,9 +109,28 @@ struct ProjectedTriangle {
     max_y: usize,
 }
 
+/// Context for tile-based cartoon rasterization, reducing parameter count.
+struct TiledRenderCtx {
+    half_w: f64,
+    half_h: f64,
+    px_w: usize,
+    px_h: usize,
+    light_dir: [f64; 3],
+}
+
+/// A rasterized tile with its position, dimensions, and pixel data.
+struct RenderedTile {
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    color: Vec<[u8; 3]>,
+    depth: Vec<f32>,
+}
+
 /// Render the cartoon mesh using tile-based parallel rasterization.
 ///
-/// 1. Project all triangles serially (backface cull + Lambert shade).
+/// 1. Project all triangles serially (Lambert shade).
 /// 2. Bin projected triangles into screen-space tiles.
 /// 3. Rasterize each tile in parallel via rayon -- each tile owns its own
 ///    color/depth arrays so no synchronization is needed.
@@ -114,16 +139,17 @@ fn render_cartoon_tiled(
     fb: &mut Framebuffer,
     mesh: &[RibbonTriangle],
     cache: &crate::render::camera::ProjectionCache,
-    light_dir: [f64; 3],
-    half_w: f64,
-    half_h: f64,
-    px_w: usize,
-    px_h: usize,
+    ctx: &TiledRenderCtx,
 ) {
     const AMBIENT: f64 = 0.55;
+    let half_w = ctx.half_w;
+    let half_h = ctx.half_h;
+    let px_w = ctx.px_w;
+    let px_h = ctx.px_h;
+    let light_dir = ctx.light_dir;
 
     // ------------------------------------------------------------------
-    // Step 1: Project, cull, and shade all triangles (serial).
+    // Step 1: Project and shade all triangles (serial).
     // ------------------------------------------------------------------
     let projected: Vec<ProjectedTriangle> = mesh
         .iter()
@@ -131,13 +157,6 @@ fn render_cartoon_tiled(
             let v0 = cache.project(tri.verts[0][0], tri.verts[0][1], tri.verts[0][2]);
             let v1 = cache.project(tri.verts[1][0], tri.verts[1][1], tri.verts[1][2]);
             let v2 = cache.project(tri.verts[2][0], tri.verts[2][1], tri.verts[2][2]);
-
-            // Backface culling (same test as the serial path).
-            let signed_area =
-                (v1.x - v0.x) * (v2.y - v0.y) - (v2.x - v0.x) * (v1.y - v0.y);
-            if signed_area <= 0.0 {
-                return None;
-            }
 
             let sv0 = to_pixel(v0.x, v0.y, v0.z, half_w, half_h);
             let sv1 = to_pixel(v1.x, v1.y, v1.z, half_w, half_h);
@@ -150,9 +169,9 @@ fn render_cartoon_tiled(
             let fmax_y = sv0[1].max(sv1[1]).max(sv2[1]).ceil() as isize;
 
             let min_x = fmin_x.max(0) as usize;
-            let max_x = (fmax_x.max(0) as usize).min(px_w - 1);
+            let max_x = (fmax_x.max(0) as usize).min(px_w.saturating_sub(1));
             let min_y = fmin_y.max(0) as usize;
-            let max_y = (fmax_y.max(0) as usize).min(px_h - 1);
+            let max_y = (fmax_y.max(0) as usize).min(px_h.saturating_sub(1));
 
             if min_x > max_x || min_y > max_y {
                 return None;
@@ -187,8 +206,8 @@ fn render_cartoon_tiled(
     // ------------------------------------------------------------------
     // Step 2: Create tile grid and bin triangles into tiles.
     // ------------------------------------------------------------------
-    let cols = (px_w + TILE_SIZE - 1) / TILE_SIZE;
-    let rows = (px_h + TILE_SIZE - 1) / TILE_SIZE;
+    let cols = px_w.div_ceil(TILE_SIZE);
+    let rows = px_h.div_ceil(TILE_SIZE);
     let num_tiles = cols * rows;
     let mut tile_triangles: Vec<Vec<usize>> = vec![Vec::new(); num_tiles];
 
@@ -208,14 +227,14 @@ fn render_cartoon_tiled(
     // Step 3: Rasterize tiles in parallel.
     // ------------------------------------------------------------------
     // Each tile produces its own local color and depth buffers.
-    let tiles: Vec<(usize, usize, usize, usize, Vec<[u8; 3]>, Vec<f32>)> = tile_triangles
+    let tiles: Vec<RenderedTile> = tile_triangles
         .into_par_iter()
         .enumerate()
         .map(|(tile_idx, tri_indices)| {
             let tx = (tile_idx % cols) * TILE_SIZE;
             let ty = (tile_idx / cols) * TILE_SIZE;
-            let tw = TILE_SIZE.min(px_w - tx);
-            let th = TILE_SIZE.min(px_h - ty);
+            let tw = TILE_SIZE.min(px_w.saturating_sub(tx));
+            let th = TILE_SIZE.min(px_h.saturating_sub(ty));
 
             let mut color = vec![[0u8; 3]; tw * th];
             let mut depth = vec![f32::INFINITY; tw * th];
@@ -225,21 +244,28 @@ fn render_cartoon_tiled(
                 rasterize_into_tile(&mut color, &mut depth, tw, th, tx, ty, tri);
             }
 
-            (tx, ty, tw, th, color, depth)
+            RenderedTile {
+                x: tx,
+                y: ty,
+                w: tw,
+                h: th,
+                color,
+                depth,
+            }
         })
         .collect();
 
     // ------------------------------------------------------------------
     // Step 4: Merge tiles back into the main framebuffer.
     // ------------------------------------------------------------------
-    for (tx, ty, tw, th, tile_color, tile_depth) in &tiles {
-        for ly in 0..*th {
-            for lx in 0..*tw {
-                let ti = ly * tw + lx;
-                let fi = (ty + ly) * px_w + (tx + lx);
-                if tile_depth[ti] < fb.depth[fi] {
-                    fb.color[fi] = tile_color[ti];
-                    fb.depth[fi] = tile_depth[ti];
+    for tile in &tiles {
+        for ly in 0..tile.h {
+            for lx in 0..tile.w {
+                let ti = ly * tile.w + lx;
+                let fi = (tile.y + ly) * px_w + (tile.x + lx);
+                if tile.depth[ti] < fb.depth[fi] {
+                    fb.color[fi] = tile.color[ti];
+                    fb.depth[fi] = tile.depth[ti];
                 }
             }
         }
@@ -265,9 +291,9 @@ fn rasterize_into_tile(
 
     // Clamp the triangle's bounding box to this tile.
     let min_x = tri.min_x.max(tx);
-    let max_x = tri.max_x.min(tx + tw - 1);
+    let max_x = tri.max_x.min((tx + tw).saturating_sub(1));
     let min_y = tri.min_y.max(ty);
-    let max_y = tri.max_y.min(ty + th - 1);
+    let max_y = tri.max_y.min((ty + th).saturating_sub(1));
 
     if min_x > max_x || min_y > max_y {
         return;
@@ -340,14 +366,7 @@ fn render_backbone_fb(
     }
 }
 
-fn atoms_bonded_3d(
-    a1_x: f64,
-    a1_y: f64,
-    a1_z: f64,
-    a2_x: f64,
-    a2_y: f64,
-    a2_z: f64,
-) -> bool {
+fn atoms_bonded_3d(a1_x: f64, a1_y: f64, a1_z: f64, a2_x: f64, a2_y: f64, a2_z: f64) -> bool {
     let dx = a2_x - a1_x;
     let dy = a2_y - a1_y;
     let dz = a2_z - a1_z;
@@ -503,8 +522,16 @@ fn render_interactions_fb(
     half_h: f64,
 ) {
     for interaction in interactions {
-        let p1 = camera.project(interaction.atom_a[0], interaction.atom_a[1], interaction.atom_a[2]);
-        let p2 = camera.project(interaction.atom_b[0], interaction.atom_b[1], interaction.atom_b[2]);
+        let p1 = camera.project(
+            interaction.atom_a[0],
+            interaction.atom_a[1],
+            interaction.atom_a[2],
+        );
+        let p2 = camera.project(
+            interaction.atom_b[0],
+            interaction.atom_b[1],
+            interaction.atom_b[2],
+        );
         let px1 = to_pixel(p1.x, p1.y, p1.z, half_w, half_h);
         let px2 = to_pixel(p2.x, p2.y, p2.z, half_w, half_h);
         let color = interaction_color(interaction.interaction_type);
@@ -515,9 +542,9 @@ fn render_interactions_fb(
 /// Map interaction type to an RGB color for rendering.
 fn interaction_color(t: InteractionType) -> [u8; 3] {
     match t {
-        InteractionType::HydrogenBond => [0, 220, 255],       // cyan
-        InteractionType::SaltBridge => [255, 80, 80],          // red
+        InteractionType::HydrogenBond => [0, 220, 255], // cyan
+        InteractionType::SaltBridge => [255, 80, 80],   // red
         InteractionType::HydrophobicContact => [220, 200, 60], // yellow
-        InteractionType::Other => [160, 160, 160],             // gray
+        InteractionType::Other => [160, 160, 160],      // gray
     }
 }

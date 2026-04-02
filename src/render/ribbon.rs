@@ -9,8 +9,8 @@
 //!
 //! The output mesh is in world space; the caller projects through the camera.
 
-use crate::model::protein::{is_purine, MoleculeType, Protein, SecondaryStructure};
-use crate::render::color::{color_to_rgb, ColorScheme};
+use crate::model::protein::{MoleculeType, Protein, SecondaryStructure, is_purine};
+use crate::render::color::{ColorScheme, color_to_rgb};
 
 // ---------------------------------------------------------------------------
 // Constants & LOD configuration
@@ -296,7 +296,7 @@ struct SplinePoint {
     color: [u8; 3],
     /// True when this point lies within the arrowhead region at the end of a
     /// sheet run.  The arrowhead linearly widens over the last two original
-    /// residue spans (2 * SPLINE_SUBDIVISIONS points).
+    /// residue spans (2 * spline_subdivisions points).
     arrow_t: Option<f64>, // 0.0 = start of arrow, 1.0 = tip
 }
 
@@ -352,7 +352,10 @@ fn coil_cross_section(sp: &SplinePoint, lod: &LodConfig) -> Vec<V3> {
     for i in 0..segs {
         let angle = 2.0 * std::f64::consts::PI * (i as f64) / (segs as f64);
         let (sin_a, cos_a) = angle.sin_cos();
-        let offset = v3_add(v3_scale(n, cos_a * COIL_RADIUS), v3_scale(b, sin_a * COIL_RADIUS));
+        let offset = v3_add(
+            v3_scale(n, cos_a * COIL_RADIUS),
+            v3_scale(b, sin_a * COIL_RADIUS),
+        );
         pts.push(v3_add(sp.pos, offset));
     }
     pts
@@ -374,12 +377,7 @@ fn triangle_normal(v0: V3, v1: V3, v2: V3) -> V3 {
 
 /// Connect two consecutive cross-section rings with a triangle strip.
 /// Both rings must have the same number of vertices.
-fn emit_strip(
-    ring_a: &[V3],
-    ring_b: &[V3],
-    color: [u8; 3],
-    out: &mut Vec<RibbonTriangle>,
-) {
+fn emit_strip(ring_a: &[V3], ring_b: &[V3], color: [u8; 3], out: &mut Vec<RibbonTriangle>) {
     let n = ring_a.len();
     debug_assert_eq!(n, ring_b.len());
     if n == 0 {
@@ -484,10 +482,7 @@ fn resample_ring(ring: &[V3], target_count: usize) -> Vec<V3> {
 ///
 /// The returned triangles are in world space.  The caller should project each
 /// vertex through the camera and then rasterize.
-pub fn generate_ribbon_mesh(
-    protein: &Protein,
-    color_scheme: &ColorScheme,
-) -> Vec<RibbonTriangle> {
+pub fn generate_ribbon_mesh(protein: &Protein, color_scheme: &ColorScheme) -> Vec<RibbonTriangle> {
     let mut triangles: Vec<RibbonTriangle> = Vec::new();
     let lod = LodConfig::for_residue_count(protein.residue_count());
 
@@ -565,7 +560,11 @@ fn build_spline_tube(records: &[CaRecord], lod: &LodConfig, out: &mut Vec<Ribbon
         for sub in 0..subdivs {
             let t = sub as f64 / lod.spline_subdivisions as f64;
             let pos = catmull_rom(p0, p1, p2, p3, t);
-            let ss = if t < 0.5 { records[i1].ss } else { records[i2].ss };
+            let ss = if t < 0.5 {
+                records[i1].ss
+            } else {
+                records[i2].ss
+            };
             let color = if t < 0.5 {
                 records[i1].color
             } else {
@@ -760,7 +759,11 @@ fn generate_chain_ribbon(
             // Interpolated secondary structure: use the nearer residue.
             let ss = if t < 0.5 { cas[i1].ss } else { cas[i2].ss };
             // Interpolated color: use the nearer residue.
-            let color = if t < 0.5 { cas[i1].color } else { cas[i2].color };
+            let color = if t < 0.5 {
+                cas[i1].color
+            } else {
+                cas[i2].color
+            };
 
             // Determine if this point is in an arrowhead region.
             // Arrow region covers the last 2 residue spans of a sheet run.
@@ -991,7 +994,11 @@ fn generate_nucleic_acid_ribbon(
         // Compute base ring centroid.
         let count = ring_positions.len() as f64;
         let centroid = ring_positions.iter().fold([0.0, 0.0, 0.0], |acc, p| {
-            [acc[0] + p[0] / count, acc[1] + p[1] / count, acc[2] + p[2] / count]
+            [
+                acc[0] + p[0] / count,
+                acc[1] + p[1] / count,
+                acc[2] + p[2] / count,
+            ]
         });
 
         // Direction from C1' to centroid (long axis of slab).
@@ -1053,14 +1060,7 @@ fn generate_nucleic_acid_ribbon(
 }
 
 /// Emit two triangles for a quad face (v0, v1, v2, v3) with correct normals.
-fn emit_quad(
-    v0: V3,
-    v1: V3,
-    v2: V3,
-    v3: V3,
-    color: [u8; 3],
-    out: &mut Vec<RibbonTriangle>,
-) {
+fn emit_quad(v0: V3, v1: V3, v2: V3, v3: V3, color: [u8; 3], out: &mut Vec<RibbonTriangle>) {
     let n1 = triangle_normal(v0, v1, v2);
     out.push(RibbonTriangle {
         verts: [v0, v1, v2],

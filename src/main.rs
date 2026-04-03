@@ -34,7 +34,7 @@ macro_rules! log {
 #[derive(Parser)]
 #[command(name = "proteinview", version, about = "TUI protein structure viewer")]
 struct Cli {
-    /// Path to PDB or mmCIF file
+    /// Path to PDB, mmCIF, or XYZ file
     file: Option<String>,
 
     /// Use HD rendering (HalfBlock over SSH, FullHD locally)
@@ -95,8 +95,14 @@ fn main() -> Result<()> {
         std::process::exit(1);
     };
 
-    // Load protein structure
-    let protein = parser::pdb::load_structure(&file_path)?;
+    // Load protein structure (dispatch by file extension)
+    let lower = file_path.to_lowercase();
+    let is_xyz = lower.ends_with(".xyz");
+    let protein = if is_xyz {
+        parser::xyz::load_xyz(&file_path)?
+    } else {
+        parser::pdb::load_structure(&file_path)?
+    };
     eprintln!(
         "Loaded: {} ({} chains, {} residues, {} atoms{})",
         protein.name,
@@ -210,6 +216,23 @@ fn main() -> Result<()> {
             );
             VizMode::Cartoon
         }
+    };
+
+    // XYZ files default to Element coloring + Wireframe mode unless overridden
+    let (color_override, viz_mode) = if is_xyz {
+        let color = if color_override.is_none() && cli.color == "structure" {
+            Some(render::color::ColorSchemeType::Element)
+        } else {
+            color_override
+        };
+        let viz = if !user_explicit_mode {
+            VizMode::Wireframe
+        } else {
+            viz_mode
+        };
+        (color, viz)
+    } else {
+        (color_override, viz_mode)
     };
 
     // Create app with actual terminal dimensions for dynamic zoom

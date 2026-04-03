@@ -1,6 +1,7 @@
 use crate::app::VizMode;
 use crate::model::interface::{Interaction, InteractionType};
 use crate::model::protein::{LigandType, MoleculeType, Protein};
+use crate::render::bond::atoms_bonded;
 use crate::render::camera::Camera;
 use crate::render::color::{ColorScheme, color_to_rgb};
 use crate::render::framebuffer::{Framebuffer, default_light_dir};
@@ -366,13 +367,6 @@ fn render_backbone_fb(
     }
 }
 
-fn atoms_bonded_3d(a1_x: f64, a1_y: f64, a1_z: f64, a2_x: f64, a2_y: f64, a2_z: f64) -> bool {
-    let dx = a2_x - a1_x;
-    let dy = a2_y - a1_y;
-    let dz = a2_z - a1_z;
-    dx * dx + dy * dy + dz * dz <= 1.9 * 1.9
-}
-
 /// Render wireframe mode to framebuffer.
 ///
 /// All atoms are always rendered (the integer underflow fix in `draw_circle_z`
@@ -412,7 +406,7 @@ fn render_wireframe_fb(
                 for j in (i + 1)..projected.len() {
                     let (a1, p1, c1) = &projected[i];
                     let (a2, p2, _) = &projected[j];
-                    if atoms_bonded_3d(a1.x, a1.y, a1.z, a2.x, a2.y, a2.z) {
+                    if atoms_bonded(&a1.element, a1.x, a1.y, a1.z, &a2.element, a2.x, a2.y, a2.z) {
                         fb.draw_thick_line_3d(*p1, *p2, *c1, 1.5 * ts);
                     }
                 }
@@ -498,12 +492,21 @@ fn render_ligands_fb(
                     fb.draw_circle_z(px[0], px[1], px[2], radius, *color);
                 }
 
-                // Draw bonds between atoms within 1.9 A
+                // Draw bonds between nearby atoms
                 for i in 0..projected.len() {
                     for j in (i + 1)..projected.len() {
                         let (a1, p1, c1) = &projected[i];
                         let (a2, p2, _) = &projected[j];
-                        if atoms_bonded_3d(a1.x, a1.y, a1.z, a2.x, a2.y, a2.z) {
+                        if atoms_bonded(
+                            &a1.element,
+                            a1.x,
+                            a1.y,
+                            a1.z,
+                            &a2.element,
+                            a2.x,
+                            a2.y,
+                            a2.z,
+                        ) {
                             fb.draw_thick_line_3d(*p1, *p2, *c1, 1.5 * ts);
                         }
                     }

@@ -70,12 +70,15 @@ pub struct HotspotSpec {
     pub color: [u8; 3],
 }
 
+/// Default render mode when not specified in JSON.
 fn default_render_mode() -> String {
     "fullhd".to_string()
 }
+/// Default color scheme when not specified in JSON.
 fn default_color() -> String {
     "structure".to_string()
 }
+/// Default visualization mode when not specified in JSON.
 fn default_viz() -> String {
     "cartoon".to_string()
 }
@@ -99,7 +102,7 @@ mod tests {
         }"#;
         let cfg: BatchConfig = serde_json::from_str(json).expect("must parse");
         assert_eq!(cfg.frames, 60);
-        assert_eq!(cfg.waypoints.len(), 2);
+        assert_eq!(cfg.render_mode, "fullhd");
         assert_eq!(cfg.color, "structure");
         assert_eq!(cfg.viz, "cartoon");
         assert!(cfg.hotspots.is_empty());

@@ -1,4 +1,5 @@
 mod app;
+mod batch;
 mod event;
 mod model;
 mod parser;

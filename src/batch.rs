@@ -70,6 +70,63 @@ pub struct HotspotSpec {
     pub color: [u8; 3],
 }
 
+use crate::render::camera::Camera;
+
+/// Returns an interpolated `Camera` at normalized time `t` along the waypoint
+/// timeline.
+///
+/// Waypoints are sorted by `t` before evaluation. `t` is clamped to [first, last].
+/// Interpolation is linear between consecutive waypoints.
+pub fn camera_at(waypoints: &[Waypoint], t: f64) -> Camera {
+    assert!(!waypoints.is_empty(), "waypoints must be non-empty");
+    let mut sorted: Vec<&Waypoint> = waypoints.iter().collect();
+    sorted.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
+
+    let first = sorted.first().unwrap();
+    let last = sorted.last().unwrap();
+    if t <= first.t {
+        return waypoint_to_camera(first);
+    }
+    if t >= last.t {
+        return waypoint_to_camera(last);
+    }
+
+    // Find bracketing waypoints
+    let mut prev = sorted[0];
+    let mut next = sorted[0];
+    for w in sorted.windows(2) {
+        if w[0].t <= t && t <= w[1].t {
+            prev = w[0];
+            next = w[1];
+            break;
+        }
+    }
+
+    let span = next.t - prev.t;
+    let alpha = if span.abs() < 1e-12 { 0.0 } else { (t - prev.t) / span };
+    let lerp = |a: f64, b: f64| a + alpha * (b - a);
+
+    let mut cam = Camera::default();
+    cam.rot_x = lerp(prev.rot_x, next.rot_x);
+    cam.rot_y = lerp(prev.rot_y, next.rot_y);
+    cam.rot_z = lerp(prev.rot_z, next.rot_z);
+    cam.zoom = lerp(prev.zoom, next.zoom);
+    cam.pan_x = lerp(prev.pan_x, next.pan_x);
+    cam.pan_y = lerp(prev.pan_y, next.pan_y);
+    cam
+}
+
+fn waypoint_to_camera(w: &Waypoint) -> Camera {
+    let mut cam = Camera::default();
+    cam.rot_x = w.rot_x;
+    cam.rot_y = w.rot_y;
+    cam.rot_z = w.rot_z;
+    cam.zoom = w.zoom;
+    cam.pan_x = w.pan_x;
+    cam.pan_y = w.pan_y;
+    cam
+}
+
 /// Default render mode when not specified in JSON.
 fn default_render_mode() -> String {
     "fullhd".to_string()
@@ -123,5 +180,39 @@ mod tests {
         assert_eq!(cfg.hotspots.len(), 1);
         assert_eq!(cfg.hotspots[0].chain, "A");
         assert_eq!(cfg.hotspots[0].residues, vec![21, 46, 48]);
+    }
+
+    #[test]
+    fn interpolates_camera_at_t_zero() {
+        let waypoints = vec![
+            Waypoint { t: 0.0, rot_x: 0.0, rot_y: 0.0, rot_z: 0.0, zoom: 1.0, pan_x: 0.0, pan_y: 0.0 },
+            Waypoint { t: 1.0, rot_x: 0.0, rot_y: std::f64::consts::TAU, rot_z: 0.0, zoom: 1.0, pan_x: 0.0, pan_y: 0.0 },
+        ];
+        let cam = camera_at(&waypoints, 0.0);
+        assert!((cam.rot_y - 0.0).abs() < 1e-9);
+        assert!((cam.zoom - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn interpolates_camera_midway() {
+        let waypoints = vec![
+            Waypoint { t: 0.0, rot_x: 0.0, rot_y: 0.0, rot_z: 0.0, zoom: 1.0, pan_x: 0.0, pan_y: 0.0 },
+            Waypoint { t: 1.0, rot_x: 0.0, rot_y: 2.0, rot_z: 0.0, zoom: 2.0, pan_x: 0.0, pan_y: 0.0 },
+        ];
+        let cam = camera_at(&waypoints, 0.5);
+        assert!((cam.rot_y - 1.0).abs() < 1e-9);
+        assert!((cam.zoom - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn clamps_outside_range() {
+        let waypoints = vec![
+            Waypoint { t: 0.0, rot_x: 0.0, rot_y: 0.0, rot_z: 0.0, zoom: 1.0, pan_x: 0.0, pan_y: 0.0 },
+            Waypoint { t: 1.0, rot_x: 0.0, rot_y: 1.0, rot_z: 0.0, zoom: 1.0, pan_x: 0.0, pan_y: 0.0 },
+        ];
+        let cam_before = camera_at(&waypoints, -0.5);
+        let cam_after = camera_at(&waypoints, 1.5);
+        assert!((cam_before.rot_y - 0.0).abs() < 1e-9);
+        assert!((cam_after.rot_y - 1.0).abs() < 1e-9);
     }
 }

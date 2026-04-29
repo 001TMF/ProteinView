@@ -137,11 +137,9 @@ fn waypoint_to_camera(w: &Waypoint) -> Camera {
 /// rasterization path so batch output is pixel-identical to what the FullHD
 /// TUI mode would produce for the same camera and color settings.
 ///
-/// Hotspot overrides in `cfg.hotspots` are currently stored in a `HighlightMap`
-/// (chain_id → residue_seq_nums → RGB).  Full integration with the color scheme
-/// (overriding individual atom colors) requires a more invasive change to the
-/// `ColorScheme` type; for the MVP batch pipeline the map is computed here and
-/// can be plumbed in future iterations (Task 6+).
+/// Hotspot residues in `cfg.hotspots` are converted to per-residue `Color::Rgb`
+/// overrides and passed to [`ColorScheme::with_highlights`], where they take
+/// priority over the base color scheme.
 pub fn render_frame(
     protein: &Protein,
     camera: &Camera,
@@ -195,15 +193,14 @@ pub fn render_frame(
     Ok(fb.to_rgb_image())
 }
 
-/// A per-residue color override table for hotspot highlighting.
-///
-/// Key: `(chain_id, residue_seq_num)` → RGB override color.
-/// Reserved for future use when `ColorScheme` gains per-residue override hooks.
+/// JSON-native per-(chain, residue) color override, used to build the
+/// `ColorScheme::with_highlights` map in `render_frame`. The `[u8; 3]` value
+/// is the RGB triple specified in `HotspotSpec`.
 pub type HighlightMap = HashMap<(String, i32), [u8; 3]>;
 
-/// Build a [`HighlightMap`] from a list of [`HotspotSpec`]s.
-///
-/// Note: not yet consumed by `draw_protein`; wired in Task 6.
+/// Build a `HighlightMap` from a slice of `HotspotSpec`s. Each `(chain, residue)`
+/// pair is mapped to the spec's RGB triple. The map is consumed by `render_frame`
+/// where it's converted to `Color::Rgb` overrides for the `ColorScheme`.
 pub fn build_highlight_map(hotspots: &[HotspotSpec]) -> HighlightMap {
     let mut map = HighlightMap::new();
     for hs in hotspots {

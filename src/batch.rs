@@ -206,6 +206,29 @@ pub fn build_highlight_map(hotspots: &[HotspotSpec]) -> HighlightMap {
     map
 }
 
+/// Top-level entrypoint: load the protein, then for each frame in [1, frames],
+/// compute t = (i - 1) / max(1, frames - 1), interpolate camera, render,
+/// and write `frame_NNNN.png` to `output_dir`.
+pub fn run(cfg: &BatchConfig) -> anyhow::Result<()> {
+    std::fs::create_dir_all(&cfg.output_dir)?;
+
+    let protein = if cfg.input.to_lowercase().ends_with(".xyz") {
+        crate::parser::xyz::load_xyz(&cfg.input)?
+    } else {
+        crate::parser::pdb::load_structure(&cfg.input)?
+    };
+
+    let denom = (cfg.frames.max(1) - 1).max(1) as f64;
+    for i in 1..=cfg.frames {
+        let t = (i.saturating_sub(1)) as f64 / denom;
+        let cam = camera_at(&cfg.waypoints, t);
+        let img = render_frame(&protein, &cam, cfg)?;
+        let path = format!("{}/frame_{:04}.png", cfg.output_dir, i);
+        img.save(&path).map_err(|e| anyhow::anyhow!("save {}: {}", path, e))?;
+    }
+    Ok(())
+}
+
 /// Default render mode when not specified in JSON.
 fn default_render_mode() -> String {
     "fullhd".to_string()
@@ -293,6 +316,36 @@ mod tests {
         let cam_after = camera_at(&waypoints, 1.5);
         assert!((cam_before.rot_y - 0.0).abs() < 1e-9);
         assert!((cam_after.rot_y - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn writes_png_sequence_to_output_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let out = tmp.path().to_str().unwrap().to_string();
+
+        let cfg = BatchConfig {
+            input: "examples/1UBQ.pdb".to_string(),
+            output_dir: out.clone(),
+            frames: 5,
+            width: 160,
+            height: 120,
+            render_mode: "fullhd".to_string(),
+            color: "structure".to_string(),
+            viz: "cartoon".to_string(),
+            waypoints: vec![
+                Waypoint { t: 0.0, rot_x: 0.0, rot_y: 0.0, rot_z: 0.0, zoom: 1.0, pan_x: 0.0, pan_y: 0.0 },
+                Waypoint { t: 1.0, rot_x: 0.0, rot_y: 1.0, rot_z: 0.0, zoom: 1.0, pan_x: 0.0, pan_y: 0.0 },
+            ],
+            hotspots: vec![],
+        };
+
+        run(&cfg).expect("batch run");
+
+        // Expect 5 files: frame_0001.png .. frame_0005.png
+        for i in 1..=5 {
+            let path = format!("{}/frame_{:04}.png", out, i);
+            assert!(std::path::Path::new(&path).exists(), "missing {path}");
+        }
     }
 
     #[test]

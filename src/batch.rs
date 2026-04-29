@@ -73,6 +73,7 @@ pub struct HotspotSpec {
     pub color: [u8; 3],
 }
 
+use crate::model::protein::Protein;
 use crate::render::camera::Camera;
 
 /// Returns an interpolated `Camera` at normalized time `t` along the waypoint
@@ -142,7 +143,7 @@ fn waypoint_to_camera(w: &Waypoint) -> Camera {
 /// `ColorScheme` type; for the MVP batch pipeline the map is computed here and
 /// can be plumbed in future iterations (Task 6+).
 pub fn render_frame(
-    protein: &crate::model::protein::Protein,
+    protein: &Protein,
     camera: &Camera,
     cfg: &BatchConfig,
 ) -> anyhow::Result<RgbImage> {
@@ -162,14 +163,17 @@ pub fn render_frame(
     // Build highlight map (reserved for future hotspot integration).
     let _highlight_map = build_highlight_map(&cfg.hotspots);
 
-    // Auto-scale zoom so the protein fills the frame at the batch resolution.
-    // We mirror the App::new() logic: zoom = 0.9 * min(w,h) / (2 * radius).
-    // Only override the waypoint zoom if the caller left it at the default (1.0).
+    // Auto-fit zoom: always compute a base zoom so the protein fills the
+    // output frame (mirroring App::new(): base = 0.9 * min(w,h) / (2*r)).
+    // The waypoint's `zoom` field is then applied as a **multiplier** on top
+    // of that base — `zoom: 1.0` means "fill the frame exactly"; `zoom: 2.0`
+    // means "2× zoomed in relative to auto-fit".  This eliminates the previous
+    // float-equality sentinel (`cam.zoom == 1.0`) which would misfire on
+    // interpolated values near 1.0 and gave no intuitive way to zoom out.
+    let radius = centered.bounding_radius().max(1.0);
+    let base_zoom = 0.9 * (cfg.width as f64).min(cfg.height as f64) / (2.0 * radius);
     let mut cam = camera.clone();
-    if cam.zoom == 1.0 {
-        let radius = centered.bounding_radius().max(1.0);
-        cam.zoom = 0.9 * (cfg.width as f64).min(cfg.height as f64) / (2.0 * radius);
-    }
+    cam.zoom = base_zoom * camera.zoom;
 
     let fb = crate::render::draw_protein(
         &centered,
@@ -190,6 +194,8 @@ pub fn render_frame(
 pub type HighlightMap = HashMap<(String, i32), [u8; 3]>;
 
 /// Build a [`HighlightMap`] from a list of [`HotspotSpec`]s.
+///
+/// Note: not yet consumed by `draw_protein`; wired in Task 6.
 pub fn build_highlight_map(hotspots: &[HotspotSpec]) -> HighlightMap {
     let mut map = HighlightMap::new();
     for hs in hotspots {

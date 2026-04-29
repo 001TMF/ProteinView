@@ -1667,6 +1667,8 @@ dependencies = [
  "ratatui-image",
  "rayon",
  "reqwest",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
 ]

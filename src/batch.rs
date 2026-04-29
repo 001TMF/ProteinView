@@ -158,10 +158,18 @@ pub fn render_frame(
     let viz_mode = crate::app::VizMode::parse(&cfg.viz);
 
     let total_residues = centered.residue_count();
-    let color_scheme = ColorScheme::new(color_type, total_residues);
 
-    // Build highlight map (reserved for future hotspot integration).
-    let _highlight_map = build_highlight_map(&cfg.hotspots);
+    // Build highlight map and convert [u8; 3] → ratatui Color::Rgb for the
+    // ColorScheme override table.
+    let highlight_map = build_highlight_map(&cfg.hotspots);
+    let highlight_colors: std::collections::HashMap<(String, i32), ratatui::style::Color> =
+        highlight_map
+            .into_iter()
+            .map(|(k, [r, g, b])| (k, ratatui::style::Color::Rgb(r, g, b)))
+            .collect();
+
+    let color_scheme = ColorScheme::new(color_type, total_residues)
+        .with_highlights(highlight_colors);
 
     // Auto-fit zoom: always compute a base zoom so the protein fills the
     // output frame (mirroring App::new(): base = 0.9 * min(w,h) / (2*r)).
@@ -346,6 +354,52 @@ mod tests {
             let path = format!("{}/frame_{:04}.png", out, i);
             assert!(std::path::Path::new(&path).exists(), "missing {path}");
         }
+    }
+
+    #[test]
+    fn hotspot_residues_are_visibly_recolored() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let out = tmp.path().to_str().unwrap().to_string();
+
+        // Two configs: identical except one has a bright-red hotspot at residue 1
+        let base_cfg = BatchConfig {
+            input: "examples/1UBQ.pdb".to_string(),
+            output_dir: out.clone(),
+            frames: 1,
+            width: 320,
+            height: 240,
+            render_mode: "fullhd".to_string(),
+            color: "structure".to_string(),
+            viz: "cartoon".to_string(),
+            waypoints: vec![Waypoint {
+                t: 0.0, rot_x: 0.0, rot_y: 0.0, rot_z: 0.0, zoom: 1.0, pan_x: 0.0, pan_y: 0.0,
+            }],
+            hotspots: vec![],
+        };
+
+        let protein = crate::parser::pdb::load_structure(&base_cfg.input).expect("load");
+        let cam = camera_at(&base_cfg.waypoints, 0.0);
+        let no_highlight = render_frame(&protein, &cam, &base_cfg).expect("render");
+
+        let mut hot_cfg = base_cfg.clone();
+        hot_cfg.hotspots = vec![HotspotSpec {
+            chain: "A".to_string(),
+            residues: (1..=20).collect(), // first 20 residues of ubiquitin
+            color: [255, 0, 0],
+        }];
+        let with_highlight = render_frame(&protein, &cam, &hot_cfg).expect("render");
+
+        // Count strongly-red pixels in each (R > 200, G < 80, B < 80)
+        let count_red = |img: &image::RgbImage| -> usize {
+            img.pixels().filter(|p| p.0[0] > 200 && p.0[1] < 80 && p.0[2] < 80).count()
+        };
+        let red_off = count_red(&no_highlight);
+        let red_on = count_red(&with_highlight);
+
+        assert!(
+            red_on > red_off + 50,
+            "expected hotspot to add red pixels: off={red_off} on={red_on}"
+        );
     }
 
     #[test]

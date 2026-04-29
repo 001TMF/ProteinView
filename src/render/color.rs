@@ -290,6 +290,25 @@ impl ColorScheme {
     }
 }
 
+/// Parse a color scheme name string (from CLI or batch config) into a [`ColorSchemeType`].
+///
+/// Unknown names fall back to [`ColorSchemeType::Structure`] with a warning.
+pub fn parse_color_scheme(s: &str) -> ColorSchemeType {
+    match s.to_ascii_lowercase().as_str() {
+        "structure" => ColorSchemeType::Structure,
+        "element" => ColorSchemeType::Element,
+        "chain" => ColorSchemeType::Chain,
+        "bfactor" | "b-factor" => ColorSchemeType::BFactor,
+        "rainbow" => ColorSchemeType::Rainbow,
+        "interface" => ColorSchemeType::Interface,
+        "plddt" => ColorSchemeType::Plddt,
+        other => {
+            eprintln!("Warning: unknown color scheme '{other}', using structure");
+            ColorSchemeType::Structure
+        }
+    }
+}
+
 /// Returns a base-type color for nucleotide residues, or `None` for non-nucleotides.
 fn nucleotide_base_color(name: &str) -> Option<Color> {
     match name {

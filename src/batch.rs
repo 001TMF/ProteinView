@@ -4,6 +4,9 @@
 //! hotspot residues, and output dir; renders a PNG sequence without entering
 //! the TUI.
 
+use std::collections::HashMap;
+
+use image::RgbImage;
 use serde::{Deserialize, Serialize};
 
 /// Top-level batch render configuration.
@@ -127,6 +130,76 @@ fn waypoint_to_camera(w: &Waypoint) -> Camera {
     cam
 }
 
+/// Render one frame to an RGB image.
+///
+/// Reuses the existing `render::draw_protein` → `render::hd::render_hd_framebuffer`
+/// rasterization path so batch output is pixel-identical to what the FullHD
+/// TUI mode would produce for the same camera and color settings.
+///
+/// Hotspot overrides in `cfg.hotspots` are currently stored in a `HighlightMap`
+/// (chain_id → residue_seq_nums → RGB).  Full integration with the color scheme
+/// (overriding individual atom colors) requires a more invasive change to the
+/// `ColorScheme` type; for the MVP batch pipeline the map is computed here and
+/// can be plumbed in future iterations (Task 6+).
+pub fn render_frame(
+    protein: &crate::model::protein::Protein,
+    camera: &Camera,
+    cfg: &BatchConfig,
+) -> anyhow::Result<RgbImage> {
+    use crate::render::color::ColorScheme;
+
+    // Center the protein at the origin, mirroring App::new().
+    // We clone here so the caller's copy is unchanged.
+    let mut centered = protein.clone();
+    centered.center();
+
+    let color_type = crate::render::color::parse_color_scheme(&cfg.color);
+    let viz_mode = crate::app::VizMode::parse(&cfg.viz);
+
+    let total_residues = centered.residue_count();
+    let color_scheme = ColorScheme::new(color_type, total_residues);
+
+    // Build highlight map (reserved for future hotspot integration).
+    let _highlight_map = build_highlight_map(&cfg.hotspots);
+
+    // Auto-scale zoom so the protein fills the frame at the batch resolution.
+    // We mirror the App::new() logic: zoom = 0.9 * min(w,h) / (2 * radius).
+    // Only override the waypoint zoom if the caller left it at the default (1.0).
+    let mut cam = camera.clone();
+    if cam.zoom == 1.0 {
+        let radius = centered.bounding_radius().max(1.0);
+        cam.zoom = 0.9 * (cfg.width as f64).min(cfg.height as f64) / (2.0 * radius);
+    }
+
+    let fb = crate::render::draw_protein(
+        &centered,
+        &cam,
+        cfg.width as usize,
+        cfg.height as usize,
+        viz_mode,
+        &color_scheme,
+    )?;
+
+    Ok(fb.to_rgb_image())
+}
+
+/// A per-residue color override table for hotspot highlighting.
+///
+/// Key: `(chain_id, residue_seq_num)` → RGB override color.
+/// Reserved for future use when `ColorScheme` gains per-residue override hooks.
+pub type HighlightMap = HashMap<(String, i32), [u8; 3]>;
+
+/// Build a [`HighlightMap`] from a list of [`HotspotSpec`]s.
+pub fn build_highlight_map(hotspots: &[HotspotSpec]) -> HighlightMap {
+    let mut map = HighlightMap::new();
+    for hs in hotspots {
+        for &seq_num in &hs.residues {
+            map.insert((hs.chain.clone(), seq_num), hs.color);
+        }
+    }
+    map
+}
+
 /// Default render mode when not specified in JSON.
 fn default_render_mode() -> String {
     "fullhd".to_string()
@@ -214,5 +287,38 @@ mod tests {
         let cam_after = camera_at(&waypoints, 1.5);
         assert!((cam_before.rot_y - 0.0).abs() < 1e-9);
         assert!((cam_after.rot_y - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn renders_one_frame_to_image() {
+        let cfg = BatchConfig {
+            input: "examples/1UBQ.pdb".to_string(),
+            output_dir: "/tmp/proteinview-batch-test".to_string(),
+            frames: 1,
+            width: 320,
+            height: 240,
+            render_mode: "fullhd".to_string(),
+            color: "structure".to_string(),
+            viz: "cartoon".to_string(),
+            waypoints: vec![Waypoint {
+                t: 0.0, rot_x: 0.0, rot_y: 0.0, rot_z: 0.0, zoom: 1.0, pan_x: 0.0, pan_y: 0.0,
+            }],
+            hotspots: vec![],
+        };
+
+        let protein = crate::parser::pdb::load_structure(&cfg.input).expect("load");
+        let cam = camera_at(&cfg.waypoints, 0.0);
+        let image = render_frame(&protein, &cam, &cfg).expect("render");
+
+        assert_eq!(image.width(), 320);
+        assert_eq!(image.height(), 240);
+
+        // Heuristic non-empty check: at least 1% of pixels are non-black
+        let total = (image.width() * image.height()) as usize;
+        let non_black = image.pixels().filter(|p| p.0[0] != 0 || p.0[1] != 0 || p.0[2] != 0).count();
+        assert!(
+            non_black * 100 >= total,
+            "rendered image too sparse: {non_black}/{total} non-black pixels"
+        );
     }
 }

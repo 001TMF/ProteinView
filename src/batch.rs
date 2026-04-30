@@ -25,9 +25,10 @@ pub struct BatchConfig {
     pub width: u32,
     pub height: u32,
 
-    /// Render mode: "fullhd", "hd", or "braille".  Batch mode always
-    /// produces RGB PNGs regardless — this string controls the rendering
-    /// path used internally (FullHD = pixel-perfect rasterization).
+    /// Render mode: "fullhd", "hd", or "braille". **Currently always
+    /// rendered as FullHD regardless of this value** — non-fullhd modes
+    /// are accepted in JSON for forward compatibility but ignored at
+    /// render time. TODO: honor non-fullhd modes.
     #[serde(default = "default_render_mode")]
     pub render_mode: String,
 
@@ -81,7 +82,7 @@ use crate::render::camera::Camera;
 ///
 /// Waypoints are sorted by `t` before evaluation. `t` is clamped to [first, last].
 /// Interpolation is linear between consecutive waypoints.
-pub fn camera_at(waypoints: &[Waypoint], t: f64) -> Camera {
+pub(crate) fn camera_at(waypoints: &[Waypoint], t: f64) -> Camera {
     assert!(!waypoints.is_empty(), "waypoints must be non-empty");
     let mut sorted: Vec<&Waypoint> = waypoints.iter().collect();
     sorted.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
@@ -107,7 +108,11 @@ pub fn camera_at(waypoints: &[Waypoint], t: f64) -> Camera {
     }
 
     let span = next.t - prev.t;
-    let alpha = if span.abs() < 1e-12 { 0.0 } else { (t - prev.t) / span };
+    let alpha = if span.abs() < 1e-12 {
+        0.0
+    } else {
+        (t - prev.t) / span
+    };
     let lerp = |a: f64, b: f64| a + alpha * (b - a);
 
     let mut cam = Camera::default();
@@ -140,7 +145,7 @@ fn waypoint_to_camera(w: &Waypoint) -> Camera {
 /// Hotspot residues in `cfg.hotspots` are converted to per-residue `Color::Rgb`
 /// overrides and passed to [`ColorScheme::with_highlights`], where they take
 /// priority over the base color scheme.
-pub fn render_frame(
+pub(crate) fn render_frame(
     protein: &Protein,
     camera: &Camera,
     cfg: &BatchConfig,
@@ -166,8 +171,8 @@ pub fn render_frame(
             .map(|(k, [r, g, b])| (k, ratatui::style::Color::Rgb(r, g, b)))
             .collect();
 
-    let color_scheme = ColorScheme::new(color_type, total_residues)
-        .with_highlights(highlight_colors);
+    let color_scheme =
+        ColorScheme::new(color_type, total_residues).with_highlights(highlight_colors);
 
     // Auto-fit zoom: always compute a base zoom so the protein fills the
     // output frame (mirroring App::new(): base = 0.9 * min(w,h) / (2*r)).
@@ -196,12 +201,12 @@ pub fn render_frame(
 /// JSON-native per-(chain, residue) color override, used to build the
 /// `ColorScheme::with_highlights` map in `render_frame`. The `[u8; 3]` value
 /// is the RGB triple specified in `HotspotSpec`.
-pub type HighlightMap = HashMap<(String, i32), [u8; 3]>;
+pub(crate) type HighlightMap = HashMap<(String, i32), [u8; 3]>;
 
 /// Build a `HighlightMap` from a slice of `HotspotSpec`s. Each `(chain, residue)`
 /// pair is mapped to the spec's RGB triple. The map is consumed by `render_frame`
 /// where it's converted to `Color::Rgb` overrides for the `ColorScheme`.
-pub fn build_highlight_map(hotspots: &[HotspotSpec]) -> HighlightMap {
+pub(crate) fn build_highlight_map(hotspots: &[HotspotSpec]) -> HighlightMap {
     let mut map = HighlightMap::new();
     for hs in hotspots {
         for &seq_num in &hs.residues {
@@ -229,7 +234,8 @@ pub fn run(cfg: &BatchConfig) -> anyhow::Result<()> {
         let cam = camera_at(&cfg.waypoints, t);
         let img = render_frame(&protein, &cam, cfg)?;
         let path = format!("{}/frame_{:04}.png", cfg.output_dir, i);
-        img.save(&path).map_err(|e| anyhow::anyhow!("save {}: {}", path, e))?;
+        img.save(&path)
+            .map_err(|e| anyhow::anyhow!("save {}: {}", path, e))?;
     }
     Ok(())
 }
@@ -292,8 +298,24 @@ mod tests {
     #[test]
     fn interpolates_camera_at_t_zero() {
         let waypoints = vec![
-            Waypoint { t: 0.0, rot_x: 0.0, rot_y: 0.0, rot_z: 0.0, zoom: 1.0, pan_x: 0.0, pan_y: 0.0 },
-            Waypoint { t: 1.0, rot_x: 0.0, rot_y: std::f64::consts::TAU, rot_z: 0.0, zoom: 1.0, pan_x: 0.0, pan_y: 0.0 },
+            Waypoint {
+                t: 0.0,
+                rot_x: 0.0,
+                rot_y: 0.0,
+                rot_z: 0.0,
+                zoom: 1.0,
+                pan_x: 0.0,
+                pan_y: 0.0,
+            },
+            Waypoint {
+                t: 1.0,
+                rot_x: 0.0,
+                rot_y: std::f64::consts::TAU,
+                rot_z: 0.0,
+                zoom: 1.0,
+                pan_x: 0.0,
+                pan_y: 0.0,
+            },
         ];
         let cam = camera_at(&waypoints, 0.0);
         assert!((cam.rot_y - 0.0).abs() < 1e-9);
@@ -303,8 +325,24 @@ mod tests {
     #[test]
     fn interpolates_camera_midway() {
         let waypoints = vec![
-            Waypoint { t: 0.0, rot_x: 0.0, rot_y: 0.0, rot_z: 0.0, zoom: 1.0, pan_x: 0.0, pan_y: 0.0 },
-            Waypoint { t: 1.0, rot_x: 0.0, rot_y: 2.0, rot_z: 0.0, zoom: 2.0, pan_x: 0.0, pan_y: 0.0 },
+            Waypoint {
+                t: 0.0,
+                rot_x: 0.0,
+                rot_y: 0.0,
+                rot_z: 0.0,
+                zoom: 1.0,
+                pan_x: 0.0,
+                pan_y: 0.0,
+            },
+            Waypoint {
+                t: 1.0,
+                rot_x: 0.0,
+                rot_y: 2.0,
+                rot_z: 0.0,
+                zoom: 2.0,
+                pan_x: 0.0,
+                pan_y: 0.0,
+            },
         ];
         let cam = camera_at(&waypoints, 0.5);
         assert!((cam.rot_y - 1.0).abs() < 1e-9);
@@ -314,8 +352,24 @@ mod tests {
     #[test]
     fn clamps_outside_range() {
         let waypoints = vec![
-            Waypoint { t: 0.0, rot_x: 0.0, rot_y: 0.0, rot_z: 0.0, zoom: 1.0, pan_x: 0.0, pan_y: 0.0 },
-            Waypoint { t: 1.0, rot_x: 0.0, rot_y: 1.0, rot_z: 0.0, zoom: 1.0, pan_x: 0.0, pan_y: 0.0 },
+            Waypoint {
+                t: 0.0,
+                rot_x: 0.0,
+                rot_y: 0.0,
+                rot_z: 0.0,
+                zoom: 1.0,
+                pan_x: 0.0,
+                pan_y: 0.0,
+            },
+            Waypoint {
+                t: 1.0,
+                rot_x: 0.0,
+                rot_y: 1.0,
+                rot_z: 0.0,
+                zoom: 1.0,
+                pan_x: 0.0,
+                pan_y: 0.0,
+            },
         ];
         let cam_before = camera_at(&waypoints, -0.5);
         let cam_after = camera_at(&waypoints, 1.5);
@@ -338,8 +392,24 @@ mod tests {
             color: "structure".to_string(),
             viz: "cartoon".to_string(),
             waypoints: vec![
-                Waypoint { t: 0.0, rot_x: 0.0, rot_y: 0.0, rot_z: 0.0, zoom: 1.0, pan_x: 0.0, pan_y: 0.0 },
-                Waypoint { t: 1.0, rot_x: 0.0, rot_y: 1.0, rot_z: 0.0, zoom: 1.0, pan_x: 0.0, pan_y: 0.0 },
+                Waypoint {
+                    t: 0.0,
+                    rot_x: 0.0,
+                    rot_y: 0.0,
+                    rot_z: 0.0,
+                    zoom: 1.0,
+                    pan_x: 0.0,
+                    pan_y: 0.0,
+                },
+                Waypoint {
+                    t: 1.0,
+                    rot_x: 0.0,
+                    rot_y: 1.0,
+                    rot_z: 0.0,
+                    zoom: 1.0,
+                    pan_x: 0.0,
+                    pan_y: 0.0,
+                },
             ],
             hotspots: vec![],
         };
@@ -369,7 +439,13 @@ mod tests {
             color: "structure".to_string(),
             viz: "cartoon".to_string(),
             waypoints: vec![Waypoint {
-                t: 0.0, rot_x: 0.0, rot_y: 0.0, rot_z: 0.0, zoom: 1.0, pan_x: 0.0, pan_y: 0.0,
+                t: 0.0,
+                rot_x: 0.0,
+                rot_y: 0.0,
+                rot_z: 0.0,
+                zoom: 1.0,
+                pan_x: 0.0,
+                pan_y: 0.0,
             }],
             hotspots: vec![],
         };
@@ -388,7 +464,9 @@ mod tests {
 
         // Count strongly-red pixels in each (R > 200, G < 80, B < 80)
         let count_red = |img: &image::RgbImage| -> usize {
-            img.pixels().filter(|p| p.0[0] > 200 && p.0[1] < 80 && p.0[2] < 80).count()
+            img.pixels()
+                .filter(|p| p.0[0] > 200 && p.0[1] < 80 && p.0[2] < 80)
+                .count()
         };
         let red_off = count_red(&no_highlight);
         let red_on = count_red(&with_highlight);
@@ -411,7 +489,13 @@ mod tests {
             color: "structure".to_string(),
             viz: "cartoon".to_string(),
             waypoints: vec![Waypoint {
-                t: 0.0, rot_x: 0.0, rot_y: 0.0, rot_z: 0.0, zoom: 1.0, pan_x: 0.0, pan_y: 0.0,
+                t: 0.0,
+                rot_x: 0.0,
+                rot_y: 0.0,
+                rot_z: 0.0,
+                zoom: 1.0,
+                pan_x: 0.0,
+                pan_y: 0.0,
             }],
             hotspots: vec![],
         };
@@ -425,7 +509,10 @@ mod tests {
 
         // Heuristic non-empty check: at least 1% of pixels are non-black
         let total = (image.width() * image.height()) as usize;
-        let non_black = image.pixels().filter(|p| p.0[0] != 0 || p.0[1] != 0 || p.0[2] != 0).count();
+        let non_black = image
+            .pixels()
+            .filter(|p| p.0[0] != 0 || p.0[1] != 0 || p.0[2] != 0)
+            .count();
         assert!(
             non_black * 100 >= total,
             "rendered image too sparse: {non_black}/{total} non-black pixels"

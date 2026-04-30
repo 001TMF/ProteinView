@@ -30,8 +30,8 @@ use crate::render::ribbon::generate_ribbon_mesh;
 /// This is the canonical headless rasterization entry-point shared by both
 /// the TUI (via `hd::render_hd_framebuffer`) and the batch pipeline.
 ///
-/// Hotspot highlights are not yet supported in this path; pass the protein
-/// with pre-applied color adjustments if needed (wired up in Task 6).
+/// Hotspot highlights are applied via the `color_scheme`'s `with_highlights`
+/// override table — see `src/batch.rs::render_frame` for the conversion.
 pub fn draw_protein(
     protein: &Protein,
     camera: &Camera,

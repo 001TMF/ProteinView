@@ -83,10 +83,13 @@ fn main() -> Result<()> {
     if let Some(config_path) = &cli.batch {
         let raw = std::fs::read_to_string(config_path)
             .map_err(|e| anyhow::anyhow!("read batch config '{}': {}", config_path, e))?;
-        let cfg: batch::BatchConfig = serde_json::from_str(&raw)
-            .map_err(|e| anyhow::anyhow!("parse batch config: {}", e))?;
+        let cfg: batch::BatchConfig =
+            serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("parse batch config: {}", e))?;
         batch::run(&cfg)?;
-        eprintln!("Batch render complete: {} frames written to {}", cfg.frames, cfg.output_dir);
+        eprintln!(
+            "Batch render complete: {} frames written to {}",
+            cfg.frames, cfg.output_dir
+        );
         return Ok(());
     }
 

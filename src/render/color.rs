@@ -110,7 +110,10 @@ impl ColorScheme {
     /// over the scheme logic and are checked first.
     pub fn residue_color(&self, residue: &Residue, chain: &Chain) -> Color {
         // Hotspot overrides take precedence over any color scheme.
-        if let Some(&color) = self.highlight_overrides.get(&(chain.id.clone(), residue.seq_num)) {
+        if let Some(&color) = self
+            .highlight_overrides
+            .get(&(chain.id.clone(), residue.seq_num))
+        {
             return color;
         }
         match self.scheme_type {

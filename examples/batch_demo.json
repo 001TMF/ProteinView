@@ -1,0 +1,15 @@
+{
+  "input": "examples/1AOI.pdb",
+  "output_dir": "/tmp/proteinview-batch-demo",
+  "frames": 60,
+  "width": 1920,
+  "height": 1080,
+  "render_mode": "fullhd",
+  "color": "structure",
+  "viz": "cartoon",
+  "waypoints": [
+    { "t": 0.0, "rot_x": 0.0, "rot_y": 0.0,    "rot_z": 0.0, "zoom": 1.0 },
+    { "t": 1.0, "rot_x": 0.0, "rot_y": 6.2832, "rot_z": 0.0, "zoom": 1.0 }
+  ],
+  "hotspots": []
+}

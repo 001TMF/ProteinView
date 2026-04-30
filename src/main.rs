@@ -1,4 +1,5 @@
 mod app;
+mod batch;
 mod event;
 mod model;
 mod parser;
@@ -68,10 +69,29 @@ struct Cli {
     /// Number of render threads (default: 4)
     #[arg(long, default_value = "4")]
     threads: usize,
+
+    /// Run in headless batch mode using the given JSON config.
+    /// Skips the TUI, writes a PNG sequence to the config's `output_dir`.
+    #[arg(long, value_name = "CONFIG_JSON")]
+    batch: Option<String>,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Batch mode short-circuit: load config, run, exit.  No TUI.
+    if let Some(config_path) = &cli.batch {
+        let raw = std::fs::read_to_string(config_path)
+            .map_err(|e| anyhow::anyhow!("read batch config '{}': {}", config_path, e))?;
+        let cfg: batch::BatchConfig =
+            serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("parse batch config: {}", e))?;
+        batch::run(&cfg)?;
+        eprintln!(
+            "Batch render complete: {} frames written to {}",
+            cfg.frames, cfg.output_dir
+        );
+        return Ok(());
+    }
 
     // Cap rayon thread pool. 4 threads is the sweet spot: the framebuffer
     // only has ~60 tiles (64x64) so more threads hit diminishing returns,

@@ -36,6 +36,21 @@ impl VizMode {
             Self::Wireframe => "Wireframe",
         }
     }
+
+    /// Parse a visualization mode name string (from CLI or batch config) into a [`VizMode`].
+    ///
+    /// Unknown names fall back to [`VizMode::Cartoon`] with a warning.
+    pub fn parse(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "cartoon" => VizMode::Cartoon,
+            "backbone" => VizMode::Backbone,
+            "wireframe" => VizMode::Wireframe,
+            other => {
+                eprintln!("Warning: unknown viz mode '{other}', using cartoon");
+                VizMode::Cartoon
+            }
+        }
+    }
 }
 
 /// Rendering mode for the 3D viewport

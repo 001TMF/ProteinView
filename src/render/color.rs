@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::model::interface::InterfaceAnalysis;
 use crate::model::protein::{Atom, Chain, Ligand, LigandType, Residue, SecondaryStructure};
@@ -58,6 +58,9 @@ pub struct ColorScheme {
     focus_chain_id: String,
     /// For Interface mode: set of (chain_id, seq_num) at the interface
     interface_residues_by_id: HashSet<(String, i32)>,
+    /// Per-residue color overrides for hotspot highlighting.
+    /// Key: `(chain_id, residue_seq_num)`. Checked before the scheme logic.
+    highlight_overrides: HashMap<(String, i32), Color>,
 }
 
 impl ColorScheme {
@@ -67,7 +70,18 @@ impl ColorScheme {
             total_residues,
             focus_chain_id: String::new(),
             interface_residues_by_id: HashSet::new(),
+            highlight_overrides: HashMap::new(),
         }
+    }
+
+    /// Builder: attach per-residue color overrides (hotspot highlights).
+    ///
+    /// Keys are `(chain_id, residue_seq_num)`.  An override color is returned
+    /// by `residue_color` (and therefore `atom_color`) before the normal scheme
+    /// logic runs.  Passing an empty map is a no-op.
+    pub fn with_highlights(mut self, highlights: HashMap<(String, i32), Color>) -> Self {
+        self.highlight_overrides = highlights;
+        self
     }
 
     pub fn new_interface(
@@ -86,11 +100,22 @@ impl ColorScheme {
             total_residues,
             focus_chain_id,
             interface_residues_by_id: analysis.interface_residues_by_id_with_protein(protein),
+            highlight_overrides: HashMap::new(),
         }
     }
 
-    /// Get color for a residue based on current scheme
+    /// Get color for a residue based on current scheme.
+    ///
+    /// Hotspot highlight overrides (set via [`with_highlights`]) take priority
+    /// over the scheme logic and are checked first.
     pub fn residue_color(&self, residue: &Residue, chain: &Chain) -> Color {
+        // Hotspot overrides take precedence over any color scheme.
+        if let Some(&color) = self
+            .highlight_overrides
+            .get(&(chain.id.clone(), residue.seq_num))
+        {
+            return color;
+        }
         match self.scheme_type {
             ColorSchemeType::Structure => self.structure_color(residue),
             ColorSchemeType::Chain => self.chain_color(chain),
@@ -287,6 +312,25 @@ impl ColorScheme {
             residue.atoms.iter().map(|a| a.b_factor).sum::<f64>() / residue.atoms.len() as f64
         };
         Self::plddt_color(avg_b)
+    }
+}
+
+/// Parse a color scheme name string (from CLI or batch config) into a [`ColorSchemeType`].
+///
+/// Unknown names fall back to [`ColorSchemeType::Structure`] with a warning.
+pub fn parse_color_scheme(s: &str) -> ColorSchemeType {
+    match s.to_ascii_lowercase().as_str() {
+        "structure" => ColorSchemeType::Structure,
+        "element" => ColorSchemeType::Element,
+        "chain" => ColorSchemeType::Chain,
+        "bfactor" | "b-factor" => ColorSchemeType::BFactor,
+        "rainbow" => ColorSchemeType::Rainbow,
+        "interface" => ColorSchemeType::Interface,
+        "plddt" => ColorSchemeType::Plddt,
+        other => {
+            eprintln!("Warning: unknown color scheme '{other}', using structure");
+            ColorSchemeType::Structure
+        }
     }
 }
 

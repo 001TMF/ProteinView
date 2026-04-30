@@ -161,6 +161,45 @@ proteinview --fetch 1UBQ
 proteinview examples/1UBQ.pdb --color rainbow --mode wireframe
 ```
 
+## Batch (headless) mode
+
+Render a deterministic PNG sequence without entering the TUI. Useful for
+producing animation frames for video editing, or for automated rendering
+pipelines (e.g. CI screenshots, demo capture).
+
+```bash
+proteinview --batch examples/batch_demo.json
+```
+
+The config (JSON) describes the input file, output directory, frame count,
+output dimensions, color/visualization mode, camera waypoints, and optional
+hotspot residue highlights. See `examples/batch_demo.json` for a reference.
+
+### Config schema
+
+```json
+{
+  "input": "path/to/structure.pdb",
+  "output_dir": "/tmp/render",
+  "frames": 60,
+  "width": 1920,
+  "height": 1080,
+  "render_mode": "fullhd",
+  "color": "structure",
+  "viz": "cartoon",
+  "waypoints": [
+    { "t": 0.0, "rot_x": 0.0, "rot_y": 0.0,    "rot_z": 0.0, "zoom": 1.0 },
+    { "t": 1.0, "rot_x": 0.0, "rot_y": 6.2832, "rot_z": 0.0, "zoom": 1.0 }
+  ],
+  "hotspots": [
+    { "chain": "A", "residues": [21, 46, 48], "color": [255, 64, 0] }
+  ]
+}
+```
+
+`waypoints[].t` is normalized time in `[0, 1]`. Frames between waypoints are
+linearly interpolated.
+
 ## Keybindings
 
 | Key | Action |

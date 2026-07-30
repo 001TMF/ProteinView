@@ -365,6 +365,63 @@ describe("ProteinView live panel client", () => {
 		expect(runtime.removed).toEqual(["/private/omp-proteinview-live-test"]);
 	});
 
+	it("applies the shutdown timeout while the shutdown response is still pending", async () => {
+		const runtime = new FakeRuntime();
+		const client = await ProteinViewPanelClient.start({
+			cwd: "/workspace",
+			request: request(),
+			runtime,
+			readyTimeoutMs: 2_000,
+			commandTimeoutMs: 1_000,
+			shutdownTimeoutMs: 10,
+		});
+		const process = runtime.transport;
+		if (process === undefined) throw new Error("fake process was not spawned");
+		process.autoRespond = false;
+
+		const outcome = await Promise.race([
+			client.close().then(() => "closed"),
+			Bun.sleep(250).then(() => "outer-timeout"),
+		]);
+
+		expect(outcome).toBe("closed");
+		expect(process.requests.at(-1)?.command).toBe("shutdown");
+		expect(process.killed).toBe(true);
+		expect(process.closeInputCalled).toBe(true);
+		expect(runtime.removed).toEqual(["/private/omp-proteinview-live-test"]);
+	});
+
+	it("preempts a pending user command when close reaches its shutdown deadline", async () => {
+		const runtime = new FakeRuntime();
+		const client = await ProteinViewPanelClient.start({
+			cwd: "/workspace",
+			request: request(),
+			runtime,
+			readyTimeoutMs: 2_000,
+			commandTimeoutMs: 1_000,
+			shutdownTimeoutMs: 10,
+		});
+		const process = runtime.transport;
+		if (process === undefined) throw new Error("fake process was not spawned");
+		process.autoRespond = false;
+		const commandError = client.command({ command: "cycle_viz" }).catch(error => error);
+		await Bun.sleep(0);
+
+		const outcome = await Promise.race([
+			client.close().then(() => "closed"),
+			Bun.sleep(250).then(() => "outer-timeout"),
+		]);
+		const error = await commandError;
+
+		expect(outcome).toBe("closed");
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toContain("shutdown timed out");
+		expect(process.requests.map(entry => entry.command)).toEqual(["cycle_viz"]);
+		expect(process.killed).toBe(true);
+		expect(process.closeInputCalled).toBe(true);
+		expect(runtime.removed).toEqual(["/private/omp-proteinview-live-test"]);
+	});
+
 	it("aborts promptly after ready while initial presentation is rendering", async () => {
 		const { client, process } = await startFakeClient();
 		process.autoRespond = false;

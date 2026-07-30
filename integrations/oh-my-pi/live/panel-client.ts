@@ -720,14 +720,17 @@ export class ProteinViewPanelClient {
 		this.#closing = true;
 		try {
 			if (this.#fault === undefined && this.#revision > 0) {
+				const shutdownTimeoutMessage = "ProteinView panel shutdown timed out";
 				try {
-					await this.#enqueue({ command: "shutdown" }, true);
-					this.#expectedExit = true;
 					await deadline(
-						this.#transport.exited.then(() => undefined),
+						(async () => {
+							await this.#enqueue({ command: "shutdown" }, true);
+							this.#expectedExit = true;
+							await this.#transport.exited;
+						})(),
 						this.#shutdownTimeoutMs,
-						() => this.#transport.kill(),
-						"ProteinView panel shutdown timed out",
+						() => this.#fail(new Error(shutdownTimeoutMessage), true),
+						shutdownTimeoutMessage,
 					);
 				} catch {
 					this.#expectedExit = true;

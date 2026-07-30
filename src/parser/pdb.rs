@@ -75,6 +75,7 @@ pub fn load_structure(path: &str) -> Result<Protein> {
                 residues.push(Residue {
                     name: res_name,
                     seq_num: residue.serial_number() as i32,
+                    insertion_code: residue.insertion_code().map(str::to_string),
                     atoms,
                     secondary_structure: SecondaryStructure::Coil,
                 });
@@ -151,6 +152,7 @@ fn classify_chain_type(residues: &[Residue]) -> MoleculeType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn test_classify_chain_type_protein() {
@@ -158,12 +160,14 @@ mod tests {
             Residue {
                 name: "ALA".to_string(),
                 seq_num: 1,
+                insertion_code: None,
                 atoms: vec![],
                 secondary_structure: SecondaryStructure::Coil,
             },
             Residue {
                 name: "GLY".to_string(),
                 seq_num: 2,
+                insertion_code: None,
                 atoms: vec![],
                 secondary_structure: SecondaryStructure::Coil,
             },
@@ -177,24 +181,28 @@ mod tests {
             Residue {
                 name: "A".to_string(),
                 seq_num: 1,
+                insertion_code: None,
                 atoms: vec![],
                 secondary_structure: SecondaryStructure::Coil,
             },
             Residue {
                 name: "U".to_string(),
                 seq_num: 2,
+                insertion_code: None,
                 atoms: vec![],
                 secondary_structure: SecondaryStructure::Coil,
             },
             Residue {
                 name: "G".to_string(),
                 seq_num: 3,
+                insertion_code: None,
                 atoms: vec![],
                 secondary_structure: SecondaryStructure::Coil,
             },
             Residue {
                 name: "C".to_string(),
                 seq_num: 4,
+                insertion_code: None,
                 atoms: vec![],
                 secondary_structure: SecondaryStructure::Coil,
             },
@@ -208,24 +216,28 @@ mod tests {
             Residue {
                 name: "DA".to_string(),
                 seq_num: 1,
+                insertion_code: None,
                 atoms: vec![],
                 secondary_structure: SecondaryStructure::Coil,
             },
             Residue {
                 name: "DT".to_string(),
                 seq_num: 2,
+                insertion_code: None,
                 atoms: vec![],
                 secondary_structure: SecondaryStructure::Coil,
             },
             Residue {
                 name: "DG".to_string(),
                 seq_num: 3,
+                insertion_code: None,
                 atoms: vec![],
                 secondary_structure: SecondaryStructure::Coil,
             },
             Residue {
                 name: "DC".to_string(),
                 seq_num: 4,
+                insertion_code: None,
                 atoms: vec![],
                 secondary_structure: SecondaryStructure::Coil,
             },
@@ -246,24 +258,28 @@ mod tests {
             Residue {
                 name: "A".to_string(),
                 seq_num: 1,
+                insertion_code: None,
                 atoms: vec![],
                 secondary_structure: SecondaryStructure::Coil,
             },
             Residue {
                 name: "U".to_string(),
                 seq_num: 2,
+                insertion_code: None,
                 atoms: vec![],
                 secondary_structure: SecondaryStructure::Coil,
             },
             Residue {
                 name: "G".to_string(),
                 seq_num: 3,
+                insertion_code: None,
                 atoms: vec![],
                 secondary_structure: SecondaryStructure::Coil,
             },
             Residue {
                 name: "DA".to_string(),
                 seq_num: 4,
+                insertion_code: None,
                 atoms: vec![],
                 secondary_structure: SecondaryStructure::Coil,
             },
@@ -308,18 +324,21 @@ mod tests {
             Residue {
                 name: "T".to_string(),
                 seq_num: 1,
+                insertion_code: None,
                 atoms: vec![],
                 secondary_structure: SecondaryStructure::Coil,
             },
             Residue {
                 name: "T".to_string(),
                 seq_num: 2,
+                insertion_code: None,
                 atoms: vec![],
                 secondary_structure: SecondaryStructure::Coil,
             },
             Residue {
                 name: "T".to_string(),
                 seq_num: 3,
+                insertion_code: None,
                 atoms: vec![],
                 secondary_structure: SecondaryStructure::Coil,
             },
@@ -448,5 +467,30 @@ mod tests {
             !COMMON_IONS.contains(&"ATP"),
             "ATP should not be a common ion"
         );
+    }
+
+    #[test]
+    fn preserves_residue_insertion_codes() {
+        let mut file = tempfile::Builder::new().suffix(".pdb").tempfile().unwrap();
+        writeln!(
+            file,
+            "ATOM      1  CA  ALA A  42       0.000   0.000   0.000  1.00 20.00           C  "
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "ATOM      2  CA  GLY A  42A      3.800   0.000   0.000  1.00 20.00           C  "
+        )
+        .unwrap();
+        writeln!(file, "TER").unwrap();
+        writeln!(file, "END").unwrap();
+
+        let protein = load_structure(file.path().to_str().unwrap()).unwrap();
+        let residues = &protein.chains[0].residues;
+        assert_eq!(residues.len(), 2);
+        assert_eq!(residues[0].seq_num, 42);
+        assert_eq!(residues[0].insertion_code, None);
+        assert_eq!(residues[1].seq_num, 42);
+        assert_eq!(residues[1].insertion_code.as_deref(), Some("A"));
     }
 }

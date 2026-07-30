@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::model::protein::Protein;
+use crate::model::selection::format_residue_id;
 
 /// Classification of inter-residue interactions at a chain interface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +219,80 @@ fn classify_interactions(protein: &Protein, contacts: &[Contact]) -> Vec<Interac
     interactions
 }
 
+fn collect_chain_pair_contacts(
+    protein: &Protein,
+    chain_a: usize,
+    chain_b: usize,
+    cutoff_sq: f64,
+    contacts: &mut Vec<Contact>,
+    interface_residues: &mut HashSet<(usize, usize)>,
+) {
+    let first = &protein.chains[chain_a];
+    let second = &protein.chains[chain_b];
+
+    for (residue_a, first_residue) in first.residues.iter().enumerate() {
+        for (residue_b, second_residue) in second.residues.iter().enumerate() {
+            let mut min_d_sq = f64::MAX;
+            let mut found_contact = false;
+
+            for atom_a in &first_residue.atoms {
+                if atom_a.element.trim() == "H" {
+                    continue;
+                }
+                for atom_b in &second_residue.atoms {
+                    if atom_b.element.trim() == "H" {
+                        continue;
+                    }
+                    let distance_sq =
+                        dist_sq(atom_a.x, atom_a.y, atom_a.z, atom_b.x, atom_b.y, atom_b.z);
+                    min_d_sq = min_d_sq.min(distance_sq);
+                    found_contact |= distance_sq <= cutoff_sq;
+                }
+            }
+
+            if found_contact {
+                contacts.push(Contact {
+                    chain_a,
+                    residue_a,
+                    chain_b,
+                    residue_b,
+                    min_distance: min_d_sq.sqrt(),
+                });
+                interface_residues.insert((chain_a, residue_a));
+                interface_residues.insert((chain_b, residue_b));
+            }
+        }
+    }
+}
+
+fn finish_interface_analysis(
+    protein: &Protein,
+    mut contacts: Vec<Contact>,
+    interface_residues: HashSet<(usize, usize)>,
+) -> InterfaceAnalysis {
+    contacts.sort_by(|a, b| {
+        a.min_distance
+            .partial_cmp(&b.min_distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut chain_interface_counts = vec![0usize; protein.chains.len()];
+    for &(chain_index, _) in &interface_residues {
+        chain_interface_counts[chain_index] += 1;
+    }
+    let total_interface_residues = interface_residues.len();
+    let interactions = classify_interactions(protein, &contacts);
+
+    InterfaceAnalysis {
+        contacts,
+        interface_residues,
+        chain_interface_counts,
+        total_interface_residues,
+        binding_pockets: None,
+        interactions,
+    }
+}
+
 /// Analyze the interface between all chain pairs in a protein.
 ///
 /// A contact exists when any heavy atom (non-hydrogen) of residue A is within
@@ -235,76 +310,56 @@ pub fn analyze_interface(protein: &Protein, cutoff: f64) -> InterfaceAnalysis {
     // Compare every pair of chains (i < j).
     for i in 0..num_chains {
         for j in (i + 1)..num_chains {
-            let chain_i = &protein.chains[i];
-            let chain_j = &protein.chains[j];
-
-            for (ri, res_i) in chain_i.residues.iter().enumerate() {
-                for (rj, res_j) in chain_j.residues.iter().enumerate() {
-                    let mut min_d_sq = f64::MAX;
-                    let mut found_contact = false;
-
-                    // Compare all heavy-atom pairs between the two residues.
-                    for atom_a in &res_i.atoms {
-                        if atom_a.element.trim() == "H" {
-                            continue;
-                        }
-                        for atom_b in &res_j.atoms {
-                            if atom_b.element.trim() == "H" {
-                                continue;
-                            }
-                            let d_sq =
-                                dist_sq(atom_a.x, atom_a.y, atom_a.z, atom_b.x, atom_b.y, atom_b.z);
-                            if d_sq < min_d_sq {
-                                min_d_sq = d_sq;
-                            }
-                            if d_sq <= cutoff_sq {
-                                found_contact = true;
-                            }
-                        }
-                    }
-
-                    if found_contact {
-                        let min_distance = min_d_sq.sqrt();
-                        contacts.push(Contact {
-                            chain_a: i,
-                            residue_a: ri,
-                            chain_b: j,
-                            residue_b: rj,
-                            min_distance,
-                        });
-                        interface_residues.insert((i, ri));
-                        interface_residues.insert((j, rj));
-                    }
-                }
-            }
+            collect_chain_pair_contacts(
+                protein,
+                i,
+                j,
+                cutoff_sq,
+                &mut contacts,
+                &mut interface_residues,
+            );
         }
     }
 
-    // Sort contacts by minimum distance (closest first).
-    contacts.sort_by(|a, b| {
-        a.min_distance
-            .partial_cmp(&b.min_distance)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    finish_interface_analysis(protein, contacts, interface_residues)
+}
 
-    // Count interface residues per chain.
-    let mut chain_interface_counts = vec![0usize; num_chains];
-    for &(chain_idx, _) in &interface_residues {
-        chain_interface_counts[chain_idx] += 1;
+/// Analyze only contacts involving one focus chain.
+///
+/// This is used by headless agent views so a request for chain A does not
+/// highlight or draw unrelated contacts between other chains.
+pub fn analyze_interface_for_chain(
+    protein: &Protein,
+    cutoff: f64,
+    focus_chain: usize,
+) -> InterfaceAnalysis {
+    let mut contacts = Vec::new();
+    let mut interface_residues = HashSet::new();
+    if focus_chain >= protein.chains.len() {
+        return finish_interface_analysis(protein, contacts, interface_residues);
     }
 
-    let total_interface_residues = interface_residues.len();
-
-    let interactions = classify_interactions(protein, &contacts);
-
-    InterfaceAnalysis {
-        contacts,
-        interface_residues,
-        chain_interface_counts,
-        total_interface_residues,
-        binding_pockets: None,
-        interactions,
+    let cutoff_sq = cutoff * cutoff;
+    for other_chain in 0..protein.chains.len() {
+        if other_chain == focus_chain {
+            continue;
+        }
+        let (chain_a, chain_b) = if focus_chain < other_chain {
+            (focus_chain, other_chain)
+        } else {
+            (other_chain, focus_chain)
+        };
+        collect_chain_pair_contacts(
+            protein,
+            chain_a,
+            chain_b,
+            cutoff_sq,
+            &mut contacts,
+            &mut interface_residues,
+        );
     }
+
+    finish_interface_analysis(protein, contacts, interface_residues)
 }
 
 /// Analyze ligand binding pockets: find polymer residues within cutoff of each ligand.
@@ -377,16 +432,20 @@ impl InterfaceAnalysis {
         (hbonds, salt_bridges, hydrophobic, other)
     }
 
-    /// Convert interface residues to (chain_id, seq_num) pairs using the protein.
+    /// Convert interface residues to exact chain/number/insertion-code IDs.
     pub fn interface_residues_by_id_with_protein(
         &self,
         protein: &Protein,
-    ) -> HashSet<(String, i32)> {
+    ) -> HashSet<(String, i32, Option<String>)> {
         let mut set = HashSet::new();
         for &(chain_idx, res_idx) in &self.interface_residues {
             if let Some(chain) = protein.chains.get(chain_idx) {
                 if let Some(residue) = chain.residues.get(res_idx) {
-                    set.insert((chain.id.clone(), residue.seq_num));
+                    set.insert((
+                        chain.id.clone(),
+                        residue.seq_num,
+                        residue.insertion_code.clone(),
+                    ));
                 }
             }
         }
@@ -477,10 +536,10 @@ impl InterfaceAnalysis {
                             "{}:{}{}-{}:{}{} ({:.1}\u{00C5})",
                             protein.chains[c.chain_a].id,
                             res_a.name,
-                            res_a.seq_num,
+                            format_residue_id(res_a.seq_num, res_a.insertion_code.as_deref()),
                             protein.chains[c.chain_b].id,
                             res_b.name,
-                            res_b.seq_num,
+                            format_residue_id(res_b.seq_num, res_b.insertion_code.as_deref()),
                             c.min_distance,
                         )
                     })
@@ -541,7 +600,7 @@ impl InterfaceAnalysis {
                                 "{}:{}{} ({:.1}\u{00C5})",
                                 protein.chains[c.chain_idx].id,
                                 res.name,
-                                res.seq_num,
+                                format_residue_id(res.seq_num, res.insertion_code.as_deref()),
                                 c.min_distance
                             )
                         })
@@ -567,6 +626,7 @@ mod tests {
         Residue {
             name: name.to_string(),
             seq_num,
+            insertion_code: None,
             atoms: vec![Atom {
                 name: "CA".to_string(),
                 element: "C".to_string(),
@@ -647,6 +707,30 @@ mod tests {
     }
 
     #[test]
+    fn test_focus_chain_excludes_unrelated_chain_pair() {
+        let protein = Protein {
+            name: "three-chain".to_string(),
+            chains: ["A", "B", "C"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, id)| Chain {
+                    id: id.to_string(),
+                    residues: vec![make_residue("ALA", 1, index as f64 * 3.0, 0.0, 0.0)],
+                    molecule_type: MoleculeType::Protein,
+                })
+                .collect(),
+            ligands: Vec::new(),
+        };
+
+        let analysis = analyze_interface_for_chain(&protein, 4.5, 0);
+        assert_eq!(analysis.contacts.len(), 1);
+        assert_eq!(analysis.contacts[0].chain_a, 0);
+        assert_eq!(analysis.contacts[0].chain_b, 1);
+        assert!(!analysis.interface_residues.contains(&(2, 0)));
+        assert_eq!(analysis.interactions.len(), 1);
+    }
+
+    #[test]
     fn test_no_contacts_below_cutoff() {
         let protein = two_chain_protein();
         let analysis = analyze_interface(&protein, 2.0);
@@ -665,6 +749,7 @@ mod tests {
                     residues: vec![Residue {
                         name: "ALA".to_string(),
                         seq_num: 1,
+                        insertion_code: None,
                         atoms: vec![Atom {
                             name: "H".to_string(),
                             element: "H".to_string(),
@@ -684,6 +769,7 @@ mod tests {
                     residues: vec![Residue {
                         name: "ASP".to_string(),
                         seq_num: 1,
+                        insertion_code: None,
                         atoms: vec![Atom {
                             name: "H".to_string(),
                             element: "H".to_string(),
@@ -718,6 +804,22 @@ mod tests {
         assert!(!lines.is_empty());
         assert!(lines[0].starts_with("Interface:"));
         assert!(lines[0].contains("2 residues"));
+    }
+
+    #[test]
+    fn summary_distinguishes_blank_and_insertion_coded_residues() {
+        let mut protein = two_chain_protein();
+        protein.chains[0].residues[0].seq_num = 42;
+        protein.chains[0].residues[1].seq_num = 42;
+        protein.chains[0].residues[1].insertion_code = Some("A".to_string());
+        protein.chains[1].residues[1].atoms[0].x = 13.0;
+
+        let summary = analyze_interface(&protein, 4.5)
+            .summary(&protein)
+            .join("\n");
+
+        assert!(summary.contains("A:ALA42-B:ASP1"));
+        assert!(summary.contains("A:GLY42[A]-B:LEU2"));
     }
 
     #[test]
@@ -848,6 +950,7 @@ mod tests {
                     residues: vec![Residue {
                         name: res_a_name.to_string(),
                         seq_num: 1,
+                        insertion_code: None,
                         atoms: atoms_a,
                         secondary_structure: SecondaryStructure::Coil,
                     }],
@@ -858,6 +961,7 @@ mod tests {
                     residues: vec![Residue {
                         name: res_b_name.to_string(),
                         seq_num: 1,
+                        insertion_code: None,
                         atoms: atoms_b,
                         secondary_structure: SecondaryStructure::Coil,
                     }],

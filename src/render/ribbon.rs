@@ -1104,6 +1104,7 @@ mod tests {
         let res = Residue {
             name: "ALA".to_string(),
             seq_num: 1,
+            insertion_code: None,
             atoms: vec![
                 make_atom("CA", 0.0, 0.0, 0.0),
                 make_atom("C", 1.0, 0.0, 0.0),
@@ -1124,6 +1125,7 @@ mod tests {
         let res = Residue {
             name: "ALA".to_string(),
             seq_num: 1,
+            insertion_code: None,
             atoms: vec![
                 make_atom("CA", 0.0, 0.0, 0.0),
                 make_atom("C", 1.0, 0.0, 0.0),
@@ -1140,6 +1142,7 @@ mod tests {
         let res = Residue {
             name: "ALA".to_string(),
             seq_num: 1,
+            insertion_code: None,
             atoms: vec![
                 make_atom("CA", 0.0, 0.0, 0.0),
                 make_atom("O", 0.0, 3.0, 0.0),

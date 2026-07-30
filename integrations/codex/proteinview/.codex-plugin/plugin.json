@@ -1,0 +1,23 @@
+{
+  "name": "proteinview",
+  "version": "0.2.0",
+  "description": "Render and interact with PDB and mmCIF protein structures in a ProteinView FullHD Codex pane.",
+  "author": {
+    "name": "Tristan Farmer",
+    "url": "https://github.com/tristanfarmer"
+  },
+  "homepage": "https://github.com/tristanfarmer/proteinview",
+  "repository": "https://github.com/tristanfarmer/proteinview",
+  "license": "MIT",
+  "keywords": ["protein", "pdb", "mmcif", "fullhd", "terminal"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "ProteinView",
+    "shortDescription": "Explore PDB proteins in terminal-native FullHD.",
+    "longDescription": "Fetch or open protein structures, render an exact 1920×1080 ProteinView snapshot, and open a persistent interactive molecular pane in compatible Codex terminals.",
+    "developerName": "Tristan Farmer",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive", "Read"],
+    "defaultPrompt": "Show me the 1UBQ PDB protein in the live FullHD viewer."
+  }
+}

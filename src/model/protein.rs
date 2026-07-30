@@ -73,6 +73,8 @@ pub struct Ligand {
 pub struct Residue {
     pub name: String,
     pub seq_num: i32,
+    /// PDB/mmCIF insertion code. `None` is the exact blank insertion code.
+    pub insertion_code: Option<String>,
     pub atoms: Vec<Atom>,
     pub secondary_structure: SecondaryStructure,
 }
@@ -279,6 +281,7 @@ mod tests {
                     .map(|(i, &b)| Residue {
                         name: "ALA".to_string(),
                         seq_num: i as i32 + 1,
+                        insertion_code: None,
                         atoms: vec![atom_with_bfactor(b)],
                         secondary_structure: SecondaryStructure::Coil,
                     })

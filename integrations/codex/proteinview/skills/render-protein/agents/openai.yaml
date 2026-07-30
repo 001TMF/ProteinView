@@ -1,0 +1,4 @@
+interface:
+  display_name: "ProteinView Live FullHD"
+  short_description: "Explore PDB proteins in a live FullHD pane"
+  default_prompt: "Use $render-protein to show me the 1UBQ PDB protein in the live viewer."

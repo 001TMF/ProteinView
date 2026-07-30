@@ -1,6 +1,7 @@
 mod app;
 mod event;
 mod model;
+mod panel_server;
 mod parser;
 mod render;
 mod ui;
@@ -15,10 +16,12 @@ use crossterm::{
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::prelude::*;
 use std::io;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use app::{App, AppConfig, ConnectionType, RenderMode, VizMode};
+use model::selection::{ResidueColorSpec, resolve_residue_colors};
 
 macro_rules! log {
     ($file:expr, $($arg:tt)*) => {
@@ -53,6 +56,10 @@ struct Cli {
     #[arg(long, default_value = "structure")]
     color: String,
 
+    /// Override one exact polymer residue color: CHAIN:RES[ICODE]=RRGGBB
+    #[arg(long, value_name = "SELECTOR=RRGGBB")]
+    residue_color: Vec<ResidueColorSpec>,
+
     /// Visualization mode: cartoon, backbone, wireframe
     #[arg(long, default_value = "cartoon")]
     mode: String,
@@ -60,6 +67,54 @@ struct Cli {
     /// Fetch structure from RCSB PDB by ID
     #[arg(long)]
     fetch: Option<String>,
+
+    /// Run the persistent headless panel server over NDJSON stdin/stdout
+    #[arg(long, requires = "output", conflicts_with = "snapshot")]
+    panel_server: bool,
+
+    /// PNG path atomically replaced by the panel server
+    #[arg(long, value_name = "PNG", requires = "panel_server")]
+    output: Option<PathBuf>,
+
+    /// Initial panel framebuffer width in pixels
+    #[arg(long, default_value_t = 960, value_name = "PX")]
+    panel_width: u32,
+
+    /// Initial panel framebuffer height in pixels
+    #[arg(long, default_value_t = 540, value_name = "PX")]
+    panel_height: u32,
+
+    /// Render one FullHD pixel frame to a PNG and exit without starting the TUI
+    #[arg(long, value_name = "PNG", conflicts_with = "panel_server")]
+    snapshot: Option<PathBuf>,
+
+    /// Snapshot width in pixels
+    #[arg(
+        long,
+        default_value_t = render::snapshot::DEFAULT_SNAPSHOT_WIDTH,
+        value_name = "PX"
+    )]
+    snapshot_width: u32,
+
+    /// Snapshot height in pixels
+    #[arg(
+        long,
+        default_value_t = render::snapshot::DEFAULT_SNAPSHOT_HEIGHT,
+        value_name = "PX"
+    )]
+    snapshot_height: u32,
+
+    /// Highlight the interface for this focus-chain ID in a snapshot
+    #[arg(long, value_name = "CHAIN", requires = "snapshot")]
+    snapshot_interface_chain: Option<String>,
+
+    /// Overlay classified interface interaction lines in a snapshot
+    #[arg(long, requires = "snapshot_interface_chain", requires = "snapshot")]
+    snapshot_interactions: bool,
+
+    /// Hide ligands and ions in a snapshot
+    #[arg(long, requires = "snapshot")]
+    snapshot_hide_ligands: bool,
 
     /// Write debug log to file (e.g. --log debug.log)
     #[arg(long)]
@@ -85,9 +140,15 @@ fn main() -> Result<()> {
         Err(e) => eprintln!("Warning: failed to initialize rayon thread pool: {e}"),
     }
 
-    // Determine the file path
-    let file_path = if let Some(pdb_id) = &cli.fetch {
-        parser::fetch::fetch_pdb(pdb_id)?
+    // Determine the file path. Fetched structures are temporary inputs and are
+    // removed immediately after parsing, including when parsing fails.
+    let fetched_path = cli
+        .fetch
+        .as_deref()
+        .map(parser::fetch::fetch_pdb)
+        .transpose()?;
+    let file_path = if let Some(path) = fetched_path.as_ref() {
+        path.clone()
     } else if let Some(path) = &cli.file {
         path.clone()
     } else {
@@ -98,11 +159,21 @@ fn main() -> Result<()> {
     // Load protein structure (dispatch by file extension)
     let lower = file_path.to_lowercase();
     let is_xyz = lower.ends_with(".xyz");
-    let protein = if is_xyz {
-        parser::xyz::load_xyz(&file_path)?
+    let protein_result = if is_xyz {
+        parser::xyz::load_xyz(&file_path)
     } else {
-        parser::pdb::load_structure(&file_path)?
+        parser::pdb::load_structure(&file_path)
     };
+    if let Some(path) = fetched_path {
+        if let Err(error) = std::fs::remove_file(&path) {
+            eprintln!(
+                "Warning: failed to remove temporary fetched structure '{}': {error}",
+                path
+            );
+        }
+    }
+    let protein = protein_result?;
+    let residue_colors = resolve_residue_colors(&protein, &cli.residue_color)?;
     eprintln!(
         "Loaded: {} ({} chains, {} residues, {} atoms{})",
         protein.name,
@@ -154,6 +225,119 @@ fn main() -> Result<()> {
         RenderMode::Braille
     };
 
+    let user_explicit_color =
+        std::env::args().any(|argument| argument == "--color" || argument.starts_with("--color="));
+
+    // Parse CLI color scheme override.
+    let color_override = match cli.color.to_ascii_lowercase().as_str() {
+        "structure" => None, // default, no override needed
+        "element" => Some(render::color::ColorSchemeType::Element),
+        "chain" => Some(render::color::ColorSchemeType::Chain),
+        "bfactor" | "b-factor" => Some(render::color::ColorSchemeType::BFactor),
+        "rainbow" => Some(render::color::ColorSchemeType::Rainbow),
+        "plddt" => Some(render::color::ColorSchemeType::Plddt),
+        _ => {
+            eprintln!(
+                "Warning: unknown color scheme '{}', using structure",
+                cli.color
+            );
+            None
+        }
+    };
+
+    // Parse CLI visualization mode override.
+    let user_explicit_mode = !cli.mode.eq_ignore_ascii_case("cartoon")
+        || std::env::args().any(|a| a == "--mode" || a.starts_with("--mode="));
+    let viz_mode = match cli.mode.to_ascii_lowercase().as_str() {
+        "cartoon" => VizMode::Cartoon,
+        "backbone" => VizMode::Backbone,
+        "wireframe" => VizMode::Wireframe,
+        _ => {
+            eprintln!(
+                "Warning: unknown visualization mode '{}', using cartoon",
+                cli.mode
+            );
+            VizMode::Cartoon
+        }
+    };
+
+    // XYZ files default to Element coloring + Wireframe mode unless overridden.
+    let (color_override, viz_mode) = if is_xyz {
+        let color = if color_override.is_none() && !user_explicit_color {
+            Some(render::color::ColorSchemeType::Element)
+        } else {
+            color_override
+        };
+        let viz = if !user_explicit_mode {
+            VizMode::Wireframe
+        } else {
+            viz_mode
+        };
+        (color, viz)
+    } else {
+        (color_override, viz_mode)
+    };
+
+    // The panel server owns a persistent, terminal-independent render session.
+    // It must start before raw mode, terminal probing, alternate-screen setup,
+    // or the crossterm input thread so its stdout remains strict NDJSON.
+    if cli.panel_server {
+        let output_path = cli
+            .output
+            .as_deref()
+            .expect("clap enforces --output with --panel-server");
+        let stdin = io::stdin();
+        let stdout = io::stdout();
+        panel_server::serve(
+            protein,
+            output_path,
+            panel_server::PanelServerOptions {
+                width: cli.panel_width,
+                height: cli.panel_height,
+                color_override,
+                residue_colors: residue_colors.clone(),
+                viz_mode,
+                user_explicit_mode,
+            },
+            stdin.lock(),
+            stdout.lock(),
+        )?;
+        return Ok(());
+    }
+
+    // A snapshot is the non-interactive form of ProteinView's FullHD pixel
+    // renderer. Exit before raw mode, terminal probing, or alternate-screen
+    // setup so it is safe to call from an agent tool running inside a TUI.
+    if let Some(snapshot_path) = cli.snapshot.as_deref() {
+        if cli.snapshot_interface_chain.is_some() && user_explicit_color {
+            anyhow::bail!(
+                "--snapshot-interface-chain uses ProteinView's interface palette and cannot be combined with --color"
+            );
+        }
+        render::snapshot::save_png(
+            protein,
+            snapshot_path,
+            render::snapshot::SnapshotOptions {
+                width: cli.snapshot_width,
+                height: cli.snapshot_height,
+                color_override,
+                residue_colors: residue_colors.clone(),
+                viz_mode,
+                user_explicit_mode,
+                show_ligands: !cli.snapshot_hide_ligands,
+                interface_chain: cli.snapshot_interface_chain.clone(),
+                show_interactions: cli.snapshot_interactions,
+            },
+        )?;
+        eprintln!(
+            "Rendered FullHD PNG: {} ({}x{})",
+            snapshot_path.display(),
+            cli.snapshot_width,
+            cli.snapshot_height
+        );
+        return Ok(());
+    }
+
     // Get terminal dimensions before entering alternate screen
     let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
     log!(logfile, "terminal size: {}x{}", term_cols, term_rows);
@@ -185,56 +369,6 @@ fn main() -> Result<()> {
         picker.font_size()
     );
 
-    // Parse CLI color scheme override
-    let color_override = match cli.color.to_ascii_lowercase().as_str() {
-        "structure" => None, // default, no override needed
-        "element" => Some(render::color::ColorSchemeType::Element),
-        "chain" => Some(render::color::ColorSchemeType::Chain),
-        "bfactor" | "b-factor" => Some(render::color::ColorSchemeType::BFactor),
-        "rainbow" => Some(render::color::ColorSchemeType::Rainbow),
-        "plddt" => Some(render::color::ColorSchemeType::Plddt),
-        _ => {
-            eprintln!(
-                "Warning: unknown color scheme '{}', using structure",
-                cli.color
-            );
-            None
-        }
-    };
-
-    // Parse CLI visualization mode override
-    let user_explicit_mode = !cli.mode.eq_ignore_ascii_case("cartoon")
-        || std::env::args().any(|a| a == "--mode" || a.starts_with("--mode="));
-    let viz_mode = match cli.mode.to_ascii_lowercase().as_str() {
-        "cartoon" => VizMode::Cartoon,
-        "backbone" => VizMode::Backbone,
-        "wireframe" => VizMode::Wireframe,
-        _ => {
-            eprintln!(
-                "Warning: unknown visualization mode '{}', using cartoon",
-                cli.mode
-            );
-            VizMode::Cartoon
-        }
-    };
-
-    // XYZ files default to Element coloring + Wireframe mode unless overridden
-    let (color_override, viz_mode) = if is_xyz {
-        let color = if color_override.is_none() && cli.color == "structure" {
-            Some(render::color::ColorSchemeType::Element)
-        } else {
-            color_override
-        };
-        let viz = if !user_explicit_mode {
-            VizMode::Wireframe
-        } else {
-            viz_mode
-        };
-        (color, viz)
-    } else {
-        (color_override, viz_mode)
-    };
-
     // Create app with actual terminal dimensions for dynamic zoom
     let mut app = App::new(
         protein,
@@ -243,6 +377,7 @@ fn main() -> Result<()> {
             viz_mode,
             user_explicit_mode,
             color_override,
+            residue_colors,
         },
         term_cols,
         term_rows,

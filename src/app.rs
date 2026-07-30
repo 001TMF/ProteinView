@@ -4,6 +4,7 @@ use ratatui_image::picker::Picker;
 
 use crate::model::interface::{InterfaceAnalysis, analyze_binding_pockets, analyze_interface};
 use crate::model::protein::Protein;
+use crate::model::selection::ResidueColorOverrides;
 use crate::render::camera::Camera;
 use crate::render::color::{ColorScheme, ColorSchemeType};
 use crate::render::ribbon::{RibbonTriangle, generate_ribbon_mesh};
@@ -94,6 +95,7 @@ pub struct AppConfig {
     pub viz_mode: VizMode,
     pub user_explicit_mode: bool,
     pub color_override: Option<ColorSchemeType>,
+    pub residue_colors: ResidueColorOverrides,
 }
 
 /// Main application state
@@ -131,6 +133,7 @@ pub struct App {
     /// When interface mode is active, we display Interface colors but
     /// preserve the user's chosen scheme so it can be restored on exit.
     saved_color_scheme_type: ColorSchemeType,
+    residue_colors: ResidueColorOverrides,
     /// Whether interface analysis has been computed. For large structures
     /// (> LARGE_STRUCTURE_THRESHOLD residues), computation starts on a
     /// background thread at startup and completes before the user needs it.
@@ -157,6 +160,7 @@ impl App {
             viz_mode,
             user_explicit_mode,
             color_override,
+            residue_colors,
         } = config;
         protein.center();
         // If user explicitly requested pLDDT via CLI, trust that even if
@@ -245,7 +249,8 @@ impl App {
         };
 
         let initial_scheme = color_override.unwrap_or(ColorSchemeType::Structure);
-        let color_scheme = ColorScheme::new(initial_scheme, total_residues);
+        let color_scheme = ColorScheme::new(initial_scheme, total_residues)
+            .with_residue_colors(residue_colors.clone());
         // Only build ribbon mesh eagerly if we're actually in Cartoon mode.
         // For Backbone/Wireframe, defer until the user switches to Cartoon.
         let (mesh_cache, mesh_dirty) = if viz_mode == VizMode::Cartoon {
@@ -278,6 +283,7 @@ impl App {
             ssh_hd_warning_frames: 0,
             needs_clear: false,
             saved_color_scheme_type: initial_scheme,
+            residue_colors,
             interface_computed,
             interface_rx,
             is_large,
@@ -291,7 +297,8 @@ impl App {
             self.saved_color_scheme_type = self.saved_color_scheme_type.next(self.has_plddt);
         } else {
             let next = self.color_scheme.scheme_type.next(self.has_plddt);
-            self.color_scheme = ColorScheme::new(next, self.protein.residue_count());
+            self.color_scheme = ColorScheme::new(next, self.protein.residue_count())
+                .with_residue_colors(self.residue_colors.clone());
             self.mesh_dirty = true;
         }
     }
@@ -337,7 +344,8 @@ impl App {
             self.current_chain,
             &self.interface_analysis,
             &self.protein,
-        );
+        )
+        .with_residue_colors(self.residue_colors.clone());
         self.mesh_dirty = true;
     }
 
@@ -388,7 +396,8 @@ impl App {
             self.show_interactions = false;
             // Restore the user's saved color scheme instead of hardcoding Structure
             self.color_scheme =
-                ColorScheme::new(self.saved_color_scheme_type, self.protein.residue_count());
+                ColorScheme::new(self.saved_color_scheme_type, self.protein.residue_count())
+                    .with_residue_colors(self.residue_colors.clone());
             self.mesh_dirty = true;
         }
     }

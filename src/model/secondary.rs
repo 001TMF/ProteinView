@@ -951,6 +951,7 @@ mod tests {
             residues.push(Residue {
                 name: "ALA".to_string(),
                 seq_num: i,
+                insertion_code: None,
                 atoms: vec![Atom {
                     name: "CA".to_string(),
                     element: "C".to_string(),
@@ -1194,6 +1195,7 @@ mod tests {
             residues: vec![Residue {
                 name: "A".to_string(),
                 seq_num: 1,
+                insertion_code: None,
                 atoms: vec![Atom {
                     name: "CA".to_string(),
                     element: "C".to_string(),
@@ -1224,6 +1226,7 @@ mod tests {
             residues: vec![Residue {
                 name: "DA".to_string(),
                 seq_num: 1,
+                insertion_code: None,
                 atoms: vec![Atom {
                     name: "CA".to_string(),
                     element: "C".to_string(),
@@ -1258,6 +1261,7 @@ mod tests {
                 Residue {
                     name: "ALA".to_string(),
                     seq_num: 1,
+                    insertion_code: None,
                     atoms: vec![Atom {
                         name: "CA".to_string(),
                         element: "C".to_string(),
@@ -1273,6 +1277,7 @@ mod tests {
                 Residue {
                     name: "GLY".to_string(),
                     seq_num: 2,
+                    insertion_code: None,
                     atoms: vec![Atom {
                         name: "CA".to_string(),
                         element: "C".to_string(),

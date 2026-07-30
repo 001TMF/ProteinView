@@ -96,6 +96,7 @@ fn parse_xyz_inner(content: &str, path: Option<&str>) -> Result<Protein> {
     let residue = Residue {
         name: "MOL".to_string(),
         seq_num: 1,
+        insertion_code: None,
         atoms,
         secondary_structure: SecondaryStructure::Coil,
     };

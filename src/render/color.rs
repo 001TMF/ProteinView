@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use crate::model::interface::InterfaceAnalysis;
 use crate::model::protein::{Atom, Chain, Ligand, LigandType, Residue, SecondaryStructure};
+use crate::model::selection::ResidueColorOverrides;
 use ratatui::style::Color;
 
 /// Available color schemes
@@ -56,8 +57,10 @@ pub struct ColorScheme {
     total_residues: usize,
     /// For Interface mode: chain ID of the "focus" (antibody) chain
     focus_chain_id: String,
-    /// For Interface mode: set of (chain_id, seq_num) at the interface
-    interface_residues_by_id: HashSet<(String, i32)>,
+    /// For Interface mode: exact (chain, sequence number, insertion code) IDs.
+    interface_residues_by_id: HashSet<(String, i32, Option<String>)>,
+    /// Exact residue colors layered above every regular and interface scheme.
+    residue_colors: ResidueColorOverrides,
 }
 
 impl ColorScheme {
@@ -67,6 +70,7 @@ impl ColorScheme {
             total_residues,
             focus_chain_id: String::new(),
             interface_residues_by_id: HashSet::new(),
+            residue_colors: ResidueColorOverrides::default(),
         }
     }
 
@@ -86,11 +90,20 @@ impl ColorScheme {
             total_residues,
             focus_chain_id,
             interface_residues_by_id: analysis.interface_residues_by_id_with_protein(protein),
+            residue_colors: ResidueColorOverrides::default(),
         }
+    }
+
+    pub fn with_residue_colors(mut self, residue_colors: ResidueColorOverrides) -> Self {
+        self.residue_colors = residue_colors;
+        self
     }
 
     /// Get color for a residue based on current scheme
     pub fn residue_color(&self, residue: &Residue, chain: &Chain) -> Color {
+        if let Some([red, green, blue]) = self.residue_colors.color_for(residue, chain) {
+            return Color::Rgb(red, green, blue);
+        }
         match self.scheme_type {
             ColorSchemeType::Structure => self.structure_color(residue),
             ColorSchemeType::Chain => self.chain_color(chain),
@@ -104,6 +117,9 @@ impl ColorScheme {
 
     /// Get color for an individual atom, respecting the current scheme.
     pub fn atom_color(&self, atom: &Atom, residue: &Residue, chain: &Chain) -> Color {
+        if let Some([red, green, blue]) = self.residue_colors.color_for(residue, chain) {
+            return Color::Rgb(red, green, blue);
+        }
         match self.scheme_type {
             ColorSchemeType::Element => Self::element_color(atom),
             _ => self.residue_color(residue, chain),
@@ -118,9 +134,11 @@ impl ColorScheme {
     ///   - Interface residues: bright orange
     ///   - Non-interface: dim gray-brown
     fn interface_color(&self, residue: &Residue, chain: &Chain) -> Color {
-        let is_contact = self
-            .interface_residues_by_id
-            .contains(&(chain.id.clone(), residue.seq_num));
+        let is_contact = self.interface_residues_by_id.contains(&(
+            chain.id.clone(),
+            residue.seq_num,
+            residue.insertion_code.clone(),
+        ));
         let is_focus = chain.id == self.focus_chain_id;
 
         match (is_focus, is_contact) {
@@ -336,13 +354,17 @@ fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::protein::{LigandType, Residue, SecondaryStructure, is_nucleotide};
+    use crate::model::protein::{
+        LigandType, MoleculeType, Protein, Residue, SecondaryStructure, is_nucleotide,
+    };
+    use crate::model::selection::{ResidueColorSpec, resolve_residue_colors};
 
     /// Build a minimal residue for testing color assignment.
     fn make_residue(name: &str, ss: SecondaryStructure) -> Residue {
         Residue {
             name: name.to_string(),
             seq_num: 1,
+            insertion_code: None,
             atoms: vec![],
             secondary_structure: ss,
         }
@@ -712,6 +734,66 @@ mod tests {
         assert_eq!(
             scheme.ligand_atom_color(&fe_atom, &ligand),
             Color::Rgb(224, 102, 51)
+        );
+    }
+
+    #[test]
+    fn exact_residue_color_overrides_every_polymer_scheme_and_element_atoms() {
+        let selected = make_residue("ALA", SecondaryStructure::Helix);
+        let unselected = Residue {
+            name: "GLY".to_string(),
+            seq_num: 2,
+            insertion_code: None,
+            atoms: vec![],
+            secondary_structure: SecondaryStructure::Sheet,
+        };
+        let chain = Chain {
+            id: "A".to_string(),
+            residues: vec![selected, unselected],
+            molecule_type: MoleculeType::Protein,
+        };
+        let protein = Protein {
+            name: "colors".to_string(),
+            chains: vec![chain],
+            ligands: vec![],
+        };
+        let spec = ResidueColorSpec::new("A", 1, None, [12, 34, 56]).unwrap();
+        let overrides = resolve_residue_colors(&protein, &[spec]).unwrap();
+        let atom = Atom {
+            name: "CA".to_string(),
+            element: "C".to_string(),
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            b_factor: 80.0,
+            is_backbone: true,
+            is_hetero: false,
+        };
+
+        for scheme_type in [
+            ColorSchemeType::Structure,
+            ColorSchemeType::Chain,
+            ColorSchemeType::Element,
+            ColorSchemeType::BFactor,
+            ColorSchemeType::Rainbow,
+            ColorSchemeType::Interface,
+            ColorSchemeType::Plddt,
+        ] {
+            let scheme = ColorScheme::new(scheme_type, 2).with_residue_colors(overrides.clone());
+            assert_eq!(
+                scheme.residue_color(&protein.chains[0].residues[0], &protein.chains[0]),
+                Color::Rgb(12, 34, 56)
+            );
+            assert_eq!(
+                scheme.atom_color(&atom, &protein.chains[0].residues[0], &protein.chains[0]),
+                Color::Rgb(12, 34, 56)
+            );
+        }
+
+        let scheme = ColorScheme::new(ColorSchemeType::Structure, 2).with_residue_colors(overrides);
+        assert_eq!(
+            scheme.residue_color(&protein.chains[0].residues[1], &protein.chains[0]),
+            Color::Rgb(255, 200, 0)
         );
     }
 }

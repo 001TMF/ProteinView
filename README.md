@@ -37,6 +37,7 @@ Terminal molecular structure viewer — load, rotate, and explore proteins, nucl
 - **7 color schemes** — structure, chain, element (CPK), B-factor, rainbow, pLDDT (AlphaFold)
 - **Interactive controls** — vim-style rotation, zoom, pan with auto-rotation
 - **PDB & mmCIF** — both formats supported, with RCSB PDB fetch (`--fetch`)
+- **Headless FullHD export** — render a pixel-perfect PNG for agents and scripts without starting a nested TUI
 - **Single static binary** — zero runtime dependencies
 
 ## Render Modes
@@ -154,12 +155,80 @@ proteinview examples/4HHB.pdb --hd
 # FullHD pixel mode (Kitty/Sixel terminals)
 proteinview examples/4HHB.pdb --fullhd
 
+# Headless FullHD pixel snapshot (no alternate screen or terminal probing)
+proteinview examples/4HHB.pdb --snapshot 4HHB.png
+
+# Fetch from RCSB and export a 1200x800 FullHD frame for inline display
+proteinview --fetch 1UBQ --snapshot 1UBQ.png \
+  --snapshot-width 1200 --snapshot-height 800
+
 # Fetch from RCSB PDB
 proteinview --fetch 1UBQ
 
 # Choose color scheme and visualization
 proteinview examples/1UBQ.pdb --color rainbow --mode wireframe
+
+# FullHD biological interface view focused on chain A
+proteinview examples/4HHB.pdb --snapshot interface.png \
+  --snapshot-interface-chain A --snapshot-interactions
+
+# Hide ligands and ions in a snapshot
+proteinview examples/4HHB.pdb --snapshot polymer-only.png \
+  --snapshot-hide-ligands
+
+# Color exact residues (blank insertion code A:42 and insertion-coded A:42[A])
+proteinview examples/4HHB.pdb --snapshot selected.png \
+  --residue-color A:42=FF0000 \
+  --residue-color 'A:42[A]=00FFFF'
 ```
+
+`--snapshot` always uses the software pixel renderer behind **FullHD** and
+writes a PNG before any raw-mode, alternate-screen, or graphics-protocol
+setup. It is therefore safe to call from another terminal application.
+This is distinct from **HD**, which is the shaded text-cell renderer.
+Snapshot dimensions default to 1920×1080 and are capped at 4096 pixels per
+side and 8,388,608 total pixels.
+Snapshots can also focus one chain's interface, overlay classified
+inter-chain interaction lines, retain or hide ligands, and use any regular
+ProteinView color or visualization mode. These controls make the headless
+renderer suitable for iterative, conversational analysis in an agent chat.
+Interface highlighting uses its own green/orange focus/partner palette rather
+than a regular color scheme. Exact residue colors identify polymer residues by
+case-sensitive chain ID, signed sequence number, and optional insertion code.
+Omitting the insertion code selects only the blank code, not every residue with
+that number. Overrides use strict uppercase `RRGGBB` and take precedence over
+regular, element, pLDDT, and interface colors.
+
+For a live agent-owned panel, start the persistent headless server with one
+private PNG path:
+
+```bash
+proteinview examples/1UBQ.pdb --panel-server \
+  --output /tmp/proteinview-live.png \
+  --panel-width 960 --panel-height 540
+```
+
+The server renders the initial frame, then writes a `ready` JSON object to
+stdout. It accepts one NDJSON command per stdin line, for example
+`{"id":1,"command":"rotate","axis":"y","delta":0.1}` or
+`{"id":2,"command":"resize","width":1200,"height":800}`. Successful state
+changes atomically replace the same PNG before their response is emitted.
+Responses include the request ID, monotonic revision, camera and presentation
+state, and exact frame path and dimensions. Use `get_state` without rendering
+or `shutdown` to acknowledge and exit. Diagnostics remain on stderr, and the
+server never emits terminal graphics escapes. Protocol requests and responses
+are each capped at 64 KiB; display-only structure names are sanitized and
+bounded, while structures whose required chain metadata cannot fit are rejected
+before the initial frame is rendered.
+
+An agent can replace all exact residue colors atomically with:
+
+```json
+{"id":3,"command":"set_residue_colors","residues":[{"chain":"A","residue_number":42,"color":"FF0000"},{"chain":"B","residue_number":101,"insertion_code":"A","color":"00FFFF"}]}
+```
+
+An empty `residues` array clears the overrides. Invalid or duplicate targets
+leave the prior frame, state, and revision unchanged.
 
 ## Keybindings
 

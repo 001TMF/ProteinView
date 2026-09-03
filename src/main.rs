@@ -60,6 +60,10 @@ struct Cli {
     #[arg(long, value_name = "SELECTOR=RRGGBB")]
     residue_color: Vec<ResidueColorSpec>,
 
+    /// Palette file (TOML). Defaults to ~/.config/proteinview/palette.toml when present
+    #[arg(long, value_name = "FILE")]
+    palette: Option<PathBuf>,
+
     /// Visualization mode: cartoon, backbone, wireframe
     #[arg(long, default_value = "cartoon")]
     mode: String,
@@ -127,6 +131,11 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Resolve the color palette before anything renders.  A bad palette is a
+    // hard error rather than a silent fallback: ignoring a file the user wrote
+    // is worse than refusing to start.
+    render::palette::init(cli.palette.as_deref())?;
 
     // Cap rayon thread pool. 4 threads is the sweet spot: the framebuffer
     // only has ~60 tiles (64x64) so more threads hit diminishing returns,

@@ -1,0 +1,97 @@
+# ProteinView color palette
+#
+# Copy to ~/.config/proteinview/palette.toml to have it picked up automatically,
+# or point at it explicitly:
+#
+#     proteinview structure.pdb --palette docs/palette.example.toml
+#
+# Every key is optional. Anything you leave out keeps its built-in default, so a
+# file containing nothing but a single color is perfectly valid. Colors are six
+# hexadecimal digits, with or without a leading '#', in either case.
+#
+# Unknown keys are an error rather than being ignored, so a typo tells you
+# instead of silently doing nothing.
+
+# --- Structure scheme (the default, keyed by secondary structure) ------------
+[structure]
+helix = "FF0080"
+sheet = "FFC800"
+turn  = "6080FF"
+coil  = "00CC00"
+
+# --- Nucleic acid bases ------------------------------------------------------
+# Used for DNA/RNA residues under the Structure scheme.
+[nucleotide]
+adenine  = "DC3C3C"
+uracil   = "3C3CDC"
+thymine  = "3C3CDC"
+guanine  = "3CB43C"
+cytosine = "DCC828"
+inosine  = "9664B4"
+
+# --- Chain scheme ------------------------------------------------------------
+# Cycled by chain id. Order matters, and the list replaces the default outright
+# rather than merging, so give it as many colors as you want in the rotation.
+[chain]
+colors = [
+  "00B4FF",
+  "FF6400",
+  "00DC64",
+  "FF3296",
+  "B464FF",
+  "FFDC00",
+  "00C8C8",
+  "FF9696",
+]
+
+# --- Element scheme (CPK) ----------------------------------------------------
+[element]
+# Color for any element not listed below.
+fallback = "C8C8C8"
+
+# These *merge* onto the built-in table, so overriding carbon leaves every other
+# element alone. Keys are element symbols and are matched case-insensitively.
+[element.symbols]
+C  = "909090"
+N  = "3050F8"
+O  = "FF0D0D"
+S  = "FFFF30"
+H  = "FFFFFF"
+P  = "FF8000"
+FE = "E06633"
+MG = "00B400"
+ZN = "7D80B0"
+CA = "3DFF00"
+MN = "9C7AC7"
+CO = "F090A0"
+CU = "C88033"
+NI = "50D050"
+CL = "1FF01F"
+BR = "A62929"
+
+# --- pLDDT scheme (AlphaFold confidence bands) -------------------------------
+[plddt]
+very_high = "0053D6"  # >= 90
+high      = "65CBF3"  # >= 70
+low       = "FFDB13"  # >= 50
+very_low  = "FF7D45"  # <  50
+
+# --- B-factor scheme ---------------------------------------------------------
+# Endpoints of a linear gradient across roughly the 5..80 B-factor range.
+[bfactor]
+low  = "0000FF"
+high = "FF0000"
+
+# --- Interface highlighting ('f') --------------------------------------------
+[interface]
+focus_contact   = "00FF64"  # focus chain, touching a partner
+focus_other     = "28643C"  # focus chain, away from the interface
+partner_contact = "FFA500"  # partner chain, touching the focus chain
+partner_other   = "64503C"  # partner chain, away from the interface
+ligand          = "FFFFFF"  # ligands, kept bright so they stay visible
+
+# --- Small molecules ---------------------------------------------------------
+[ligand]
+ligand  = "FF00FF"
+ion     = "00FFFF"
+rainbow = "FF00FF"  # ligands under the Rainbow scheme

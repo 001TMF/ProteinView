@@ -263,6 +263,33 @@ leave the prior frame, state, and revision unchanged.
 | **Rainbow** | N-terminus (blue) to C-terminus (red). |
 | **pLDDT** | AlphaFold confidence (blue=high, orange=low). |
 
+### Customizing the palette
+
+Every fixed color above can be changed from a TOML file. ProteinView reads
+`~/.config/proteinview/palette.toml` (or `$XDG_CONFIG_HOME/proteinview/palette.toml`)
+when it exists, and `--palette <FILE>` overrides that:
+
+```bash
+proteinview examples/1UBQ.pdb --palette my-palette.toml
+```
+
+Every key is optional — anything you leave out keeps its built-in default, so a
+file this short is valid:
+
+```toml
+[structure]
+helix = "#00FFFF"
+```
+
+Colors are six hex digits, with or without a leading `#`, in either case.
+Element symbols merge onto the built-in CPK table, so overriding carbon leaves
+the rest alone, while `[chain] colors` replaces the chain cycle outright. Unknown
+keys are rejected rather than ignored, so a typo tells you rather than silently
+doing nothing.
+
+See [`docs/palette.example.toml`](docs/palette.example.toml) for a fully
+commented file listing every setting at its default value.
+
 ## Terminal Support
 
 | Terminal | Braille | HD | FullHD |

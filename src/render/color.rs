@@ -3,7 +3,24 @@ use std::collections::HashSet;
 use crate::model::interface::InterfaceAnalysis;
 use crate::model::protein::{Atom, Chain, Ligand, LigandType, Residue, SecondaryStructure};
 use crate::model::selection::ResidueColorOverrides;
+use crate::render::palette::{Rgb, palette};
 use ratatui::style::Color;
+
+/// Convert a palette entry to a ratatui color.
+#[inline]
+fn rgb(color: Rgb) -> Color {
+    Color::Rgb(color.0[0], color.0[1], color.0[2])
+}
+
+/// Linear blend between two palette entries.
+///
+/// Written as `low * (1 - t) + high * t` so that the default blue-to-red
+/// endpoints reproduce the previous hardcoded arithmetic bit for bit.
+#[inline]
+fn lerp_rgb(low: Rgb, high: Rgb, t: f64) -> Color {
+    let channel = |i: usize| (low.0[i] as f64 * (1.0 - t) + high.0[i] as f64 * t) as u8;
+    Color::Rgb(channel(0), channel(1), channel(2))
+}
 
 /// Available color schemes
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -107,7 +124,8 @@ impl ColorScheme {
         match self.scheme_type {
             ColorSchemeType::Structure => self.structure_color(residue),
             ColorSchemeType::Chain => self.chain_color(chain),
-            ColorSchemeType::Element => Color::Rgb(144, 144, 144),
+            // Residue-level stand-in; the Element scheme colors per atom.
+            ColorSchemeType::Element => rgb(palette().element.get("C")),
             ColorSchemeType::BFactor => self.bfactor_color(residue),
             ColorSchemeType::Rainbow => self.rainbow_color(residue),
             ColorSchemeType::Interface => self.interface_color(residue, chain),
@@ -141,79 +159,50 @@ impl ColorScheme {
         ));
         let is_focus = chain.id == self.focus_chain_id;
 
+        let p = &palette().interface;
         match (is_focus, is_contact) {
-            (true, true) => Color::Rgb(0, 255, 100), // Bright green — antibody interface
-            (true, false) => Color::Rgb(40, 100, 60), // Dim green — antibody non-interface
-            (false, true) => Color::Rgb(255, 165, 0), // Bright orange — antigen interface
-            (false, false) => Color::Rgb(100, 80, 60), // Dim brown — antigen non-interface
+            (true, true) => rgb(p.focus_contact),
+            (true, false) => rgb(p.focus_other),
+            (false, true) => rgb(p.partner_contact),
+            (false, false) => rgb(p.partner_other),
         }
     }
 
     /// CPK-style element coloring
     pub fn element_color(atom: &Atom) -> Color {
-        match atom.element.trim() {
-            "C" => Color::Rgb(144, 144, 144),
-            "N" => Color::Rgb(48, 80, 248),
-            "O" => Color::Rgb(255, 13, 13),
-            "S" => Color::Rgb(255, 255, 48),
-            "H" => Color::Rgb(255, 255, 255),
-            "P" => Color::Rgb(255, 128, 0),
-            "FE" | "Fe" => Color::Rgb(224, 102, 51),
-            "MG" | "Mg" => Color::Rgb(0, 180, 0), // Magnesium — green
-            "ZN" | "Zn" => Color::Rgb(125, 128, 176), // Zinc — blue-gray
-            "CA" | "Ca" => Color::Rgb(61, 255, 0), // Calcium — green
-            "MN" | "Mn" => Color::Rgb(156, 122, 199), // Manganese — purple
-            "CO" | "Co" => Color::Rgb(240, 144, 160), // Cobalt — pink
-            "CU" | "Cu" => Color::Rgb(200, 128, 51), // Copper — brown-orange
-            "NI" | "Ni" => Color::Rgb(80, 208, 80), // Nickel — green
-            "CL" | "Cl" => Color::Rgb(31, 240, 31), // Chlorine — green
-            "BR" | "Br" => Color::Rgb(166, 41, 41), // Bromine — dark red
-            _ => Color::Rgb(200, 200, 200),
-        }
+        rgb(palette().element.get(&atom.element))
     }
 
     /// Get base color for a ligand based on current scheme.
     pub fn ligand_color(&self, ligand: &Ligand) -> Color {
         match self.scheme_type {
-            ColorSchemeType::Structure => match ligand.ligand_type {
-                LigandType::Ligand => Color::Rgb(255, 0, 255), // magenta for ligands
-                LigandType::Ion => Color::Rgb(0, 255, 255),    // cyan for ions
-            },
-            ColorSchemeType::Element => Color::Rgb(144, 144, 144), // overridden per-atom
+            ColorSchemeType::Structure => Self::ligand_base_color(ligand),
+            // Overridden per-atom; carbon grey stands in for the whole molecule.
+            ColorSchemeType::Element => rgb(palette().element.get("C")),
             ColorSchemeType::BFactor => {
                 let avg_b = if ligand.atoms.is_empty() {
                     0.0
                 } else {
                     ligand.atoms.iter().map(|a| a.b_factor).sum::<f64>() / ligand.atoms.len() as f64
                 };
-                let t = ((avg_b - 5.0) / 75.0).clamp(0.0, 1.0);
-                let r = (t * 255.0) as u8;
-                let b = ((1.0 - t) * 255.0) as u8;
-                Color::Rgb(r, 0, b)
+                bfactor_gradient(avg_b)
             }
-            ColorSchemeType::Chain => {
-                // Match parent chain's color using chain_id
-                let chain_colors = [
-                    Color::Rgb(0, 180, 255),
-                    Color::Rgb(255, 100, 0),
-                    Color::Rgb(0, 220, 100),
-                    Color::Rgb(255, 50, 150),
-                    Color::Rgb(180, 100, 255),
-                    Color::Rgb(255, 220, 0),
-                    Color::Rgb(0, 200, 200),
-                    Color::Rgb(255, 150, 150),
-                ];
-                let idx =
-                    ligand.chain_id.bytes().next().unwrap_or(b'A') as usize % chain_colors.len();
-                chain_colors[idx]
-            }
-            ColorSchemeType::Rainbow => Color::Rgb(255, 0, 255),
-            ColorSchemeType::Interface => Color::Rgb(255, 255, 255), // bright white to stand out
+            // Match parent chain's color using chain_id
+            ColorSchemeType::Chain => rgb(palette().chain(&ligand.chain_id)),
+            ColorSchemeType::Rainbow => rgb(palette().ligand.rainbow),
+            // Drawn bright so it stands out against the interface coloring.
+            ColorSchemeType::Interface => rgb(palette().interface.ligand),
             // pLDDT mode: fall back to Structure-mode colors for ligands
-            ColorSchemeType::Plddt => match ligand.ligand_type {
-                LigandType::Ligand => Color::Rgb(255, 0, 255), // magenta for ligands
-                LigandType::Ion => Color::Rgb(0, 255, 255),    // cyan for ions
-            },
+            ColorSchemeType::Plddt => Self::ligand_base_color(ligand),
+        }
+    }
+
+    /// Palette color for a ligand by kind, shared by the Structure and pLDDT schemes.
+    fn ligand_base_color(ligand: &Ligand) -> Color {
+        let p = &palette().ligand;
+        match ligand.ligand_type {
+            LigandType::Ligand => rgb(p.ligand),
+            LigandType::Ion => rgb(p.ion),
         }
     }
 
@@ -233,27 +222,17 @@ impl ColorScheme {
             return color;
         }
 
+        let p = &palette().structure;
         match residue.secondary_structure {
-            SecondaryStructure::Helix => Color::Rgb(255, 0, 128),
-            SecondaryStructure::Sheet => Color::Rgb(255, 200, 0),
-            SecondaryStructure::Turn => Color::Rgb(96, 128, 255),
-            SecondaryStructure::Coil => Color::Rgb(0, 204, 0),
+            SecondaryStructure::Helix => rgb(p.helix),
+            SecondaryStructure::Sheet => rgb(p.sheet),
+            SecondaryStructure::Turn => rgb(p.turn),
+            SecondaryStructure::Coil => rgb(p.coil),
         }
     }
 
     fn chain_color(&self, chain: &Chain) -> Color {
-        let chain_colors = [
-            Color::Rgb(0, 180, 255),
-            Color::Rgb(255, 100, 0),
-            Color::Rgb(0, 220, 100),
-            Color::Rgb(255, 50, 150),
-            Color::Rgb(180, 100, 255),
-            Color::Rgb(255, 220, 0),
-            Color::Rgb(0, 200, 200),
-            Color::Rgb(255, 150, 150),
-        ];
-        let idx = chain.id.bytes().next().unwrap_or(b'A') as usize % chain_colors.len();
-        chain_colors[idx]
+        rgb(palette().chain(&chain.id))
     }
 
     fn bfactor_color(&self, residue: &Residue) -> Color {
@@ -262,10 +241,7 @@ impl ColorScheme {
         } else {
             residue.atoms.iter().map(|a| a.b_factor).sum::<f64>() / residue.atoms.len() as f64
         };
-        let t = ((avg_b - 5.0) / 75.0).clamp(0.0, 1.0);
-        let r = (t * 255.0) as u8;
-        let b = ((1.0 - t) * 255.0) as u8;
-        Color::Rgb(r, 0, b)
+        bfactor_gradient(avg_b)
     }
 
     fn rainbow_color(&self, residue: &Residue) -> Color {
@@ -286,14 +262,15 @@ impl ColorScheme {
     /// - >= 50: yellow     (low confidence)
     /// - <  50: orange     (very low confidence)
     pub fn plddt_color(b_factor: f64) -> Color {
+        let p = &palette().plddt;
         if b_factor >= 90.0 {
-            Color::Rgb(0, 83, 214)
+            rgb(p.very_high)
         } else if b_factor >= 70.0 {
-            Color::Rgb(101, 203, 243)
+            rgb(p.high)
         } else if b_factor >= 50.0 {
-            Color::Rgb(255, 219, 19)
+            rgb(p.low)
         } else {
-            Color::Rgb(255, 125, 69)
+            rgb(p.very_low)
         }
     }
 
@@ -308,15 +285,26 @@ impl ColorScheme {
     }
 }
 
+/// Map a raw B-factor onto the configured cold-to-hot gradient.
+///
+/// The 5..80 domain matches the range these files typically occupy; values
+/// outside it clamp to the endpoints.
+fn bfactor_gradient(b_factor: f64) -> Color {
+    let p = &palette().bfactor;
+    let t = ((b_factor - 5.0) / 75.0).clamp(0.0, 1.0);
+    lerp_rgb(p.low, p.high, t)
+}
+
 /// Returns a base-type color for nucleotide residues, or `None` for non-nucleotides.
 fn nucleotide_base_color(name: &str) -> Option<Color> {
+    let p = &palette().nucleotide;
     match name {
-        "A" | "DA" | "AMP" => Some(Color::Rgb(220, 60, 60)), // Adenine — red
-        "U" | "UMP" => Some(Color::Rgb(60, 60, 220)),        // Uracil — blue
-        "T" | "DT" => Some(Color::Rgb(60, 60, 220)),         // Thymine — blue
-        "G" | "DG" | "GMP" => Some(Color::Rgb(60, 180, 60)), // Guanine — green
-        "C" | "DC" | "CMP" => Some(Color::Rgb(220, 200, 40)), // Cytosine — yellow
-        "I" | "DI" => Some(Color::Rgb(150, 100, 180)),       // Inosine — purple
+        "A" | "DA" | "AMP" => Some(rgb(p.adenine)),
+        "U" | "UMP" => Some(rgb(p.uracil)),
+        "T" | "DT" => Some(rgb(p.thymine)),
+        "G" | "DG" | "GMP" => Some(rgb(p.guanine)),
+        "C" | "DC" | "CMP" => Some(rgb(p.cytosine)),
+        "I" | "DI" => Some(rgb(p.inosine)),
         _ => None,
     }
 }

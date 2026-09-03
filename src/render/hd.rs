@@ -122,7 +122,6 @@ struct TiledRenderCtx {
 /// A rasterized tile with its position, dimensions, and pixel data.
 struct RenderedTile {
     x: usize,
-    y: usize,
     w: usize,
     h: usize,
     color: Vec<[u8; 3]>,
@@ -153,7 +152,7 @@ fn render_cartoon_tiled(
     // Step 1: Project and shade all triangles (serial).
     // ------------------------------------------------------------------
     let projected: Vec<ProjectedTriangle> = mesh
-        .iter()
+        .par_iter()
         .filter_map(|tri| {
             let v0 = cache.project(tri.verts[0][0], tri.verts[0][1], tri.verts[0][2]);
             let v1 = cache.project(tri.verts[1][0], tri.verts[1][1], tri.verts[1][2]);
@@ -247,7 +246,6 @@ fn render_cartoon_tiled(
 
             RenderedTile {
                 x: tx,
-                y: ty,
                 w: tw,
                 h: th,
                 color,
@@ -259,18 +257,33 @@ fn render_cartoon_tiled(
     // ------------------------------------------------------------------
     // Step 4: Merge tiles back into the main framebuffer.
     // ------------------------------------------------------------------
-    for tile in &tiles {
-        for ly in 0..tile.h {
-            for lx in 0..tile.w {
-                let ti = ly * tile.w + lx;
-                let fi = (tile.y + ly) * px_w + (tile.x + lx);
-                if tile.depth[ti] < fb.depth[fi] {
-                    fb.color[fi] = tile.color[ti];
-                    fb.depth[fi] = tile.depth[ti];
+    // Tiles cover disjoint screen rectangles, so the merge parallelizes cleanly
+    // over framebuffer rows: row `y` is covered by exactly the `cols` tiles in
+    // tile-row `y / TILE_SIZE`.
+    let tiles = &tiles;
+    fb.color
+        .par_chunks_mut(px_w)
+        .zip(fb.depth.par_chunks_mut(px_w))
+        .enumerate()
+        .for_each(|(y, (color_row, depth_row))| {
+            let tr = y / TILE_SIZE;
+            let ly = y % TILE_SIZE;
+            for tc in 0..cols {
+                let tile = &tiles[tr * cols + tc];
+                if ly >= tile.h {
+                    continue;
+                }
+                let src_base = ly * tile.w;
+                for lx in 0..tile.w {
+                    let ti = src_base + lx;
+                    let fi = tile.x + lx;
+                    if tile.depth[ti] < depth_row[fi] {
+                        color_row[fi] = tile.color[ti];
+                        depth_row[fi] = tile.depth[ti];
+                    }
                 }
             }
-        }
-    }
+        });
 }
 
 /// Rasterize a single projected triangle into a tile's local buffers.

@@ -303,6 +303,16 @@ impl App {
         }
     }
 
+    /// Whether the ribbon mesh will be rebuilt on the next `ribbon_mesh()` call.
+    pub fn mesh_is_dirty(&self) -> bool {
+        self.mesh_dirty
+    }
+
+    /// Whether a background interface analysis is still outstanding.
+    pub fn interface_pending(&self) -> bool {
+        !self.interface_computed
+    }
+
     /// Poll the background interface analysis thread (non-blocking).
     /// Called each frame so results are absorbed as soon as they're ready.
     pub fn poll_background_interface(&mut self) {

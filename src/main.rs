@@ -482,13 +482,16 @@ fn main() -> Result<()> {
         // Only rebuild when in Cartoon mode — Backbone/Wireframe don't use the
         // ribbon mesh, so skipping this preserves the lazy-mesh optimization for
         // large structures that start in a non-Cartoon mode.
+        let mesh_was_rebuilt = app.viz_mode == VizMode::Cartoon && app.mesh_is_dirty();
         if app.viz_mode == VizMode::Cartoon {
             app.ribbon_mesh();
         }
 
         // Always poll the background interface thread, even during skipped
         // frames, so the result is absorbed as soon as it's available.
+        let interface_was_pending = app.interface_pending();
         app.poll_background_interface();
+        let interface_absorbed = interface_was_pending && !app.interface_pending();
 
         // Adaptive frame skipping: if the previous draw took longer than the
         // tick rate, skip frames proportionally.  User input always forces a
@@ -503,6 +506,25 @@ fn main() -> Result<()> {
             // Reset the camera's tick timer so the next real tick doesn't see
             // a huge accumulated dt from the skipped frames.
             app.camera.reset_tick_timer();
+            std::thread::sleep(tick_rate);
+            continue;
+        }
+
+        // Nothing on screen changes unless input arrived, an animation is
+        // running, or background state was just absorbed.  Redrawing anyway
+        // would re-run the whole rasterize + encode pipeline and push a fresh
+        // full-viewport image at every tick -- on FullHD that is hundreds of
+        // kilobytes of escape sequences per frame, forever, for an image
+        // identical to the one already on screen.
+        let animating = app.camera.auto_rotate || app.ssh_hd_warning;
+        let must_redraw = had_input
+            || animating
+            || app.needs_clear
+            || mesh_was_rebuilt
+            || interface_absorbed
+            || frame_count < 2;
+        if !must_redraw {
+            app.tick();
             std::thread::sleep(tick_rate);
             continue;
         }

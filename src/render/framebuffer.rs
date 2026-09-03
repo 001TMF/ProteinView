@@ -1,4 +1,5 @@
 use image::{RgbImage, RgbaImage};
+use rayon::prelude::*;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -180,18 +181,18 @@ impl Framebuffer {
     /// Background pixels (depth == INFINITY) remain unchanged (black).
     pub fn apply_depth_tint(&mut self, fog_color: [u8; 3], fog_strength: f64) {
         // Find z_min and z_max across all valid (non-background) pixels.
-        let mut z_min = f32::INFINITY;
-        let mut z_max = f32::NEG_INFINITY;
-        for &d in &self.depth {
-            if d < f32::INFINITY {
-                if d < z_min {
-                    z_min = d;
-                }
-                if d > z_max {
-                    z_max = d;
-                }
-            }
-        }
+        let (z_min, z_max) = self
+            .depth
+            .par_iter()
+            .filter(|d| **d < f32::INFINITY)
+            .fold(
+                || (f32::INFINITY, f32::NEG_INFINITY),
+                |(lo, hi), &d| (lo.min(d), hi.max(d)),
+            )
+            .reduce(
+                || (f32::INFINITY, f32::NEG_INFINITY),
+                |a, b| (a.0.min(b.0), a.1.max(b.1)),
+            );
 
         // No valid pixels, or all at the same depth — nothing to tint.
         let z_range = z_max - z_min;
@@ -201,21 +202,23 @@ impl Framebuffer {
 
         let inv_range = 1.0 / z_range;
 
-        for i in 0..self.depth.len() {
-            let d = self.depth[i];
+        // Per-pixel and independent -- parallelize over rows.
+        self.color
+            .par_iter_mut()
+            .zip(self.depth.par_iter())
+            .for_each(|(c, &d)| {
             if d >= f32::INFINITY {
-                continue; // background pixel — leave black
+                return; // background pixel — leave black
             }
             let t = ((d - z_min) * inv_range).clamp(0.0, 1.0);
             let blend = t as f64 * fog_strength;
-            let c = &mut self.color[i];
             c[0] =
                 (c[0] as f64 + (fog_color[0] as f64 - c[0] as f64) * blend).clamp(0.0, 255.0) as u8;
             c[1] =
                 (c[1] as f64 + (fog_color[1] as f64 - c[1] as f64) * blend).clamp(0.0, 255.0) as u8;
             c[2] =
                 (c[2] as f64 + (fog_color[2] as f64 - c[2] as f64) * blend).clamp(0.0, 255.0) as u8;
-        }
+        });
     }
 
     /// Cohen-Sutherland line clipping against framebuffer bounds [0, width) x [0, height).

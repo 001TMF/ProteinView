@@ -481,10 +481,7 @@ mod tests {
     fn chain_colors_survive_being_written_after_other_sections() {
         // A bare top-level `chains = [...]` would bind to whichever [table]
         // preceded it. Keeping it in its own section makes order irrelevant.
-        let p = parse(
-            "[structure]\nhelix = \"FF0000\"\n\n[chain]\ncolors = [\"00FF00\"]",
-        )
-        .unwrap();
+        let p = parse("[structure]\nhelix = \"FF0000\"\n\n[chain]\ncolors = [\"00FF00\"]").unwrap();
         assert_eq!(p.chains, vec![Rgb::new(0, 255, 0)]);
         assert_eq!(p.structure.helix, Rgb::new(255, 0, 0));
     }

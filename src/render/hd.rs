@@ -136,14 +136,30 @@ fn to_pixel(proj_x: f64, proj_y: f64, proj_z: f64, half_w: f64, half_h: f64) -> 
 }
 
 // ---------------------------------------------------------------------------
-// Tile-based parallel cartoon rasterization
+// Band-based parallel cartoon rasterization
 // ---------------------------------------------------------------------------
 
-/// Tile size in pixels.  64x64 is a good balance between parallelism (many
-/// tiles) and per-tile overhead (triangle binning, allocation).
-const TILE_SIZE: usize = 64;
+/// Inside-test epsilon, shared by the scanline span solver and the exact
+/// per-pixel test so the two always agree.
+const EDGE_EPS: f64 = 1e-6;
 
-/// A projected, shaded triangle ready for rasterization into tiles.
+/// Target number of horizontal bands per worker thread.
+///
+/// Bands are the unit of parallelism *and* of triangle binning.  More bands per
+/// thread balances uneven triangle distribution (a protein rarely fills the
+/// viewport evenly) at the cost of re-visiting triangles that straddle a band
+/// boundary.  Four is enough to keep every worker busy without meaningfully
+/// inflating the bin lists.
+const BANDS_PER_THREAD: usize = 4;
+
+/// Smallest band height in pixels.  Below this the per-band bookkeeping starts
+/// to cost more than the parallelism buys.
+const MIN_BAND_HEIGHT: usize = 16;
+
+/// A projected, shaded triangle ready for rasterization.
+///
+/// The barycentric setup is computed once here, in the parallel projection
+/// pass, rather than once per band the triangle touches.
 struct ProjectedTriangle {
     /// Screen-space vertices `[x, y, z]`.
     verts: [[f64; 3]; 3],
@@ -154,9 +170,37 @@ struct ProjectedTriangle {
     max_x: usize,
     min_y: usize,
     max_y: usize,
+    /// Barycentric coefficients: `u = u_x * dx + u_yc * dy`, likewise for `v`,
+    /// where `dx`/`dy` are offsets from vertex 2.
+    u_x: f64,
+    v_x: f64,
+    u_yc: f64,
+    v_yc: f64,
 }
 
-/// Context for tile-based cartoon rasterization, reducing parameter count.
+impl ProjectedTriangle {
+    /// Placeholder for a triangle that is off-screen or degenerate.  An empty
+    /// bounding box (`min_x > max_x`) is the marker.
+    const CULLED: Self = Self {
+        verts: [[0.0; 3]; 3],
+        shaded: [0; 3],
+        min_x: 1,
+        max_x: 0,
+        min_y: 1,
+        max_y: 0,
+        u_x: 0.0,
+        v_x: 0.0,
+        u_yc: 0.0,
+        v_yc: 0.0,
+    };
+
+    #[inline]
+    fn is_culled(&self) -> bool {
+        self.min_x > self.max_x
+    }
+}
+
+/// Context for band-based cartoon rasterization, reducing parameter count.
 struct TiledRenderCtx {
     half_w: f64,
     half_h: f64,
@@ -165,22 +209,13 @@ struct TiledRenderCtx {
     light_dir: [f64; 3],
 }
 
-/// A rasterized tile with its position, dimensions, and pixel data.
-struct RenderedTile {
-    x: usize,
-    w: usize,
-    h: usize,
-    color: Vec<[u8; 3]>,
-    depth: Vec<f32>,
-}
-
-/// Render the cartoon mesh using tile-based parallel rasterization.
+/// Render the cartoon mesh using band-based parallel rasterization.
 ///
-/// 1. Project all triangles serially (Lambert shade).
-/// 2. Bin projected triangles into screen-space tiles.
-/// 3. Rasterize each tile in parallel via rayon -- each tile owns its own
-///    color/depth arrays so no synchronization is needed.
-/// 4. Merge tile results back into the main framebuffer.
+/// 1. Project, shade and set up all triangles (parallel).
+/// 2. Bin them into horizontal screen bands via a flat CSR index.
+/// 3. Rasterize each band in parallel, writing **straight into** the
+///    framebuffer rows that band owns -- bands are disjoint row ranges, so no
+///    synchronization, no per-band scratch buffers, and no merge pass.
 fn render_cartoon_tiled(
     fb: &mut Framebuffer,
     mesh: &[RibbonTriangle],
@@ -195,208 +230,308 @@ fn render_cartoon_tiled(
     let light_dir = ctx.light_dir;
 
     // ------------------------------------------------------------------
-    // Step 1: Project and shade all triangles (serial).
+    // Step 1: Project, shade and set up all triangles (parallel).
     // ------------------------------------------------------------------
-    let projected: Vec<ProjectedTriangle> = mesh
-        .par_iter()
-        .filter_map(|tri| {
-            let v0 = cache.project(tri.verts[0][0], tri.verts[0][1], tri.verts[0][2]);
-            let v1 = cache.project(tri.verts[1][0], tri.verts[1][1], tri.verts[1][2]);
-            let v2 = cache.project(tri.verts[2][0], tri.verts[2][1], tri.verts[2][2]);
+    // Reuse the projected-triangle buffer across frames.  At interactive
+    // resolutions this array is several megabytes; reallocating and re-faulting
+    // it every frame showed up as the single largest allocator cost in a
+    // profile of the render loop.
+    SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        let projected: &mut Vec<ProjectedTriangle> = &mut scratch;
+        mesh.par_iter()
+            .map(|tri| {
+                let v0 = cache.project(tri.verts[0][0], tri.verts[0][1], tri.verts[0][2]);
+                let v1 = cache.project(tri.verts[1][0], tri.verts[1][1], tri.verts[1][2]);
+                let v2 = cache.project(tri.verts[2][0], tri.verts[2][1], tri.verts[2][2]);
 
-            let sv0 = to_pixel(v0.x, v0.y, v0.z, half_w, half_h);
-            let sv1 = to_pixel(v1.x, v1.y, v1.z, half_w, half_h);
-            let sv2 = to_pixel(v2.x, v2.y, v2.z, half_w, half_h);
+                let sv0 = to_pixel(v0.x, v0.y, v0.z, half_w, half_h);
+                let sv1 = to_pixel(v1.x, v1.y, v1.z, half_w, half_h);
+                let sv2 = to_pixel(v2.x, v2.y, v2.z, half_w, half_h);
 
-            // Screen-space bounding box clamped to framebuffer.
-            let fmin_x = sv0[0].min(sv1[0]).min(sv2[0]).floor() as isize;
-            let fmax_x = sv0[0].max(sv1[0]).max(sv2[0]).ceil() as isize;
-            let fmin_y = sv0[1].min(sv1[1]).min(sv2[1]).floor() as isize;
-            let fmax_y = sv0[1].max(sv1[1]).max(sv2[1]).ceil() as isize;
+                // Screen-space bounding box clamped to framebuffer.
+                let fmin_x = sv0[0].min(sv1[0]).min(sv2[0]).floor() as isize;
+                let fmax_x = sv0[0].max(sv1[0]).max(sv2[0]).ceil() as isize;
+                let fmin_y = sv0[1].min(sv1[1]).min(sv2[1]).floor() as isize;
+                let fmax_y = sv0[1].max(sv1[1]).max(sv2[1]).ceil() as isize;
 
-            let min_x = fmin_x.max(0) as usize;
-            let max_x = (fmax_x.max(0) as usize).min(px_w.saturating_sub(1));
-            let min_y = fmin_y.max(0) as usize;
-            let max_y = (fmax_y.max(0) as usize).min(px_h.saturating_sub(1));
+                let min_x = fmin_x.max(0) as usize;
+                let max_x = (fmax_x.max(0) as usize).min(px_w.saturating_sub(1));
+                let min_y = fmin_y.max(0) as usize;
+                let max_y = (fmax_y.max(0) as usize).min(px_h.saturating_sub(1));
 
-            if min_x > max_x || min_y > max_y {
-                return None;
-            }
+                // Barycentric denominator (twice the signed screen-space area).
+                let denom =
+                    (sv1[1] - sv2[1]) * (sv0[0] - sv2[0]) + (sv2[0] - sv1[0]) * (sv0[1] - sv2[1]);
 
-            // Two-sided half-Lambert shading (identical to `rasterize_triangle_depth`).
-            let rn = cache.rotate_normal(tri.normal[0], tri.normal[1], tri.normal[2]);
-            let dot = rn[0] * light_dir[0] + rn[1] * light_dir[1] + rn[2] * light_dir[2];
-            let half_lambert = dot.abs() * 0.4 + 0.6;
-            let intensity = AMBIENT + (1.0 - AMBIENT) * half_lambert;
-            let shaded: [u8; 3] = [
-                (tri.color[0] as f64 * intensity).min(255.0) as u8,
-                (tri.color[1] as f64 * intensity).min(255.0) as u8,
-                (tri.color[2] as f64 * intensity).min(255.0) as u8,
-            ];
+                // Off-screen or degenerate: emit a culled entry rather than
+                // filtering, so the parallel map stays indexed and can write
+                // straight into the reused buffer without any reallocation.
+                if min_x > max_x || min_y > max_y || denom.abs() < 1e-12 {
+                    return ProjectedTriangle::CULLED;
+                }
+                let inv_denom = 1.0 / denom;
 
-            Some(ProjectedTriangle {
-                verts: [sv0, sv1, sv2],
-                shaded,
-                min_x,
-                max_x,
-                min_y,
-                max_y,
+                // Two-sided half-Lambert shading (identical to `rasterize_triangle_depth`).
+                let rn = cache.rotate_normal(tri.normal[0], tri.normal[1], tri.normal[2]);
+                let dot = rn[0] * light_dir[0] + rn[1] * light_dir[1] + rn[2] * light_dir[2];
+                let half_lambert = dot.abs() * 0.4 + 0.6;
+                let intensity = AMBIENT + (1.0 - AMBIENT) * half_lambert;
+                let shaded: [u8; 3] = [
+                    (tri.color[0] as f64 * intensity).min(255.0) as u8,
+                    (tri.color[1] as f64 * intensity).min(255.0) as u8,
+                    (tri.color[2] as f64 * intensity).min(255.0) as u8,
+                ];
+
+                ProjectedTriangle {
+                    verts: [sv0, sv1, sv2],
+                    shaded,
+                    min_x,
+                    max_x,
+                    min_y,
+                    max_y,
+                    u_x: (sv1[1] - sv2[1]) * inv_denom,
+                    v_x: (sv2[1] - sv0[1]) * inv_denom,
+                    u_yc: (sv2[0] - sv1[0]) * inv_denom,
+                    v_yc: (sv0[0] - sv2[0]) * inv_denom,
+                }
             })
-        })
-        .collect();
+            .collect_into_vec(projected);
 
-    if projected.is_empty() {
-        return;
-    }
+        if projected.is_empty() {
+            return;
+        }
 
-    // ------------------------------------------------------------------
-    // Step 2: Create tile grid and bin triangles into tiles.
-    // ------------------------------------------------------------------
-    let cols = px_w.div_ceil(TILE_SIZE);
-    let rows = px_h.div_ceil(TILE_SIZE);
-    let num_tiles = cols * rows;
-    let mut tile_triangles: Vec<Vec<usize>> = vec![Vec::new(); num_tiles];
+        // ------------------------------------------------------------------
+        // Step 2: Bin triangles into horizontal bands (flat CSR index).
+        // ------------------------------------------------------------------
+        // A `Vec<Vec<usize>>` would allocate and grow one heap buffer per band
+        // every frame; counting first and scattering into a single flat array
+        // costs two linear passes and one allocation.
+        let threads = rayon::current_num_threads().max(1);
+        let band_h = (px_h.div_ceil(threads * BANDS_PER_THREAD)).max(MIN_BAND_HEIGHT);
+        let num_bands = px_h.div_ceil(band_h);
 
-    for (tri_idx, tri) in projected.iter().enumerate() {
-        let tc0 = tri.min_x / TILE_SIZE;
-        let tc1 = tri.max_x / TILE_SIZE;
-        let tr0 = tri.min_y / TILE_SIZE;
-        let tr1 = tri.max_y / TILE_SIZE;
-        for tr in tr0..=tr1 {
-            for tc in tc0..=tc1 {
-                tile_triangles[tr * cols + tc].push(tri_idx);
+        let mut offsets = vec![0u32; num_bands + 1];
+        for tri in projected.iter().filter(|t| !t.is_culled()) {
+            let b0 = tri.min_y / band_h;
+            let b1 = tri.max_y / band_h;
+            for slot in &mut offsets[b0 + 1..=b1 + 1] {
+                *slot += 1;
             }
         }
-    }
-
-    // ------------------------------------------------------------------
-    // Step 3: Rasterize tiles in parallel.
-    // ------------------------------------------------------------------
-    // Each tile produces its own local color and depth buffers.
-    let tiles: Vec<RenderedTile> = tile_triangles
-        .into_par_iter()
-        .enumerate()
-        .map(|(tile_idx, tri_indices)| {
-            let tx = (tile_idx % cols) * TILE_SIZE;
-            let ty = (tile_idx / cols) * TILE_SIZE;
-            let tw = TILE_SIZE.min(px_w.saturating_sub(tx));
-            let th = TILE_SIZE.min(px_h.saturating_sub(ty));
-
-            let mut color = vec![[0u8; 3]; tw * th];
-            let mut depth = vec![f32::INFINITY; tw * th];
-
-            for &tri_idx in &tri_indices {
-                let tri = &projected[tri_idx];
-                rasterize_into_tile(&mut color, &mut depth, tw, th, tx, ty, tri);
+        for i in 0..num_bands {
+            offsets[i + 1] += offsets[i];
+        }
+        let mut items = vec![0u32; offsets[num_bands] as usize];
+        let mut cursor = offsets.clone();
+        for (tri_idx, tri) in projected.iter().enumerate() {
+            if tri.is_culled() {
+                continue;
             }
-
-            RenderedTile {
-                x: tx,
-                w: tw,
-                h: th,
-                color,
-                depth,
+            let b0 = tri.min_y / band_h;
+            let b1 = tri.max_y / band_h;
+            for b in b0..=b1 {
+                items[cursor[b] as usize] = tri_idx as u32;
+                cursor[b] += 1;
             }
-        })
-        .collect();
+        }
 
-    // ------------------------------------------------------------------
-    // Step 4: Merge tiles back into the main framebuffer.
-    // ------------------------------------------------------------------
-    // Tiles cover disjoint screen rectangles, so the merge parallelizes cleanly
-    // over framebuffer rows: row `y` is covered by exactly the `cols` tiles in
-    // tile-row `y / TILE_SIZE`.
-    let tiles = &tiles;
-    fb.color
-        .par_chunks_mut(px_w)
-        .zip(fb.depth.par_chunks_mut(px_w))
-        .enumerate()
-        .for_each(|(y, (color_row, depth_row))| {
-            let tr = y / TILE_SIZE;
-            let ly = y % TILE_SIZE;
-            for tc in 0..cols {
-                let tile = &tiles[tr * cols + tc];
-                if ly >= tile.h {
-                    continue;
+        // ------------------------------------------------------------------
+        // Step 3: Rasterize bands in parallel, straight into the framebuffer.
+        // ------------------------------------------------------------------
+        let projected: &[ProjectedTriangle] = projected;
+        let items = &items;
+        let offsets = &offsets;
+        fb.color
+            .par_chunks_mut(band_h * px_w)
+            .zip(fb.depth.par_chunks_mut(band_h * px_w))
+            .enumerate()
+            .for_each(|(band, (color, depth))| {
+                let y0 = band * band_h;
+                let rows = color.len() / px_w;
+                let lo = offsets[band] as usize;
+                let hi = offsets[band + 1] as usize;
+                for &tri_idx in &items[lo..hi] {
+                    rasterize_band(color, depth, px_w, y0, rows, &projected[tri_idx as usize]);
                 }
-                let src_base = ly * tile.w;
-                for lx in 0..tile.w {
-                    let ti = src_base + lx;
-                    let fi = tile.x + lx;
-                    if tile.depth[ti] < depth_row[fi] {
-                        color_row[fi] = tile.color[ti];
-                        depth_row[fi] = tile.depth[ti];
-                    }
-                }
-            }
-        });
+            });
+    });
 }
 
-/// Rasterize a single projected triangle into a tile's local buffers.
+thread_local! {
+    static SCRATCH: std::cell::RefCell<Vec<ProjectedTriangle>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A triangle edge as a moving x-bound while walking down scanlines.
 ///
-/// The algorithm is identical to `Framebuffer::rasterize_triangle_depth` but
-/// operates on tile-local coordinate arrays.  `tx`/`ty` are the pixel
-/// coordinates of the tile's top-left corner in the full framebuffer.
+/// Each barycentric constraint has the form `a * dx + c * dy >= t`, so the `dx`
+/// at which it flips is `t/a - (c/a) * dy` — **linear in `dy`**.  Solving that
+/// once per triangle and then stepping by the slope each scanline replaces
+/// three floating-point divisions per scanline with one addition.
+#[derive(Clone, Copy)]
+struct EdgeBound {
+    /// Current bound on `dx`, valid for the scanline being processed.
+    at: f64,
+    /// How the bound moves per scanline.
+    step: f64,
+}
+
+/// A constraint whose `dx` coefficient is zero: it does not bound `x` at all,
+/// it just switches whole scanlines on or off.
+#[derive(Clone, Copy)]
+struct FlatBound {
+    c: f64,
+    t: f64,
+}
+
+/// Rasterize one projected triangle into the framebuffer rows owned by a band.
+///
+/// `y0` is the framebuffer row the band starts at and `rows` is how many rows
+/// it owns; `color`/`depth` are that band's slices, so row `py` lives at
+/// `(py - y0) * px_w`.
+///
+/// Rather than scanning the triangle's full bounding box and rejecting most of
+/// it — ribbon triangles are thin slivers whose bounding box is several times
+/// their area — each scanline is reduced to the x-range where all three
+/// barycentric half-planes can hold, walked incrementally down the triangle.
+/// The exact same inside test then runs over just that range, widened by a
+/// pixel at each end so floating-point error can never clip a covered pixel.
 #[inline]
-fn rasterize_into_tile(
+fn rasterize_band(
     color: &mut [[u8; 3]],
     depth: &mut [f32],
-    tw: usize,
-    th: usize,
-    tx: usize,
-    ty: usize,
+    px_w: usize,
+    y0: usize,
+    rows: usize,
     tri: &ProjectedTriangle,
 ) {
     let [v0, v1, v2] = tri.verts;
 
-    // Clamp the triangle's bounding box to this tile.
-    let min_x = tri.min_x.max(tx);
-    let max_x = tri.max_x.min((tx + tw).saturating_sub(1));
-    let min_y = tri.min_y.max(ty);
-    let max_y = tri.max_y.min((ty + th).saturating_sub(1));
-
-    if min_x > max_x || min_y > max_y {
+    let y_start = tri.min_y.max(y0);
+    let y_end = tri.max_y.min(y0 + rows - 1);
+    if y_start > y_end || tri.min_x > tri.max_x {
         return;
     }
 
-    // Barycentric denominator (same math as `rasterize_triangle_depth`).
-    let denom = (v1[1] - v2[1]) * (v0[0] - v2[0]) + (v2[0] - v1[0]) * (v0[1] - v2[1]);
-    if denom.abs() < 1e-12 {
-        return; // degenerate triangle
+    let (u_x, v_x, u_yc, v_yc) = (tri.u_x, tri.v_x, tri.u_yc, tri.v_yc);
+    // w = 1 - u - v, so `w >= -EPS` is `-(u_x+v_x) dx - (u_yc+v_yc) dy >= -1-EPS`.
+    let dy_start = y_start as f64 + 0.5 - v2[1];
+
+    let mut lower: [EdgeBound; 3] = [EdgeBound { at: 0.0, step: 0.0 }; 3];
+    let mut upper: [EdgeBound; 3] = [EdgeBound { at: 0.0, step: 0.0 }; 3];
+    let mut flat: [FlatBound; 3] = [FlatBound { c: 0.0, t: 0.0 }; 3];
+    let (mut n_lower, mut n_upper, mut n_flat) = (0usize, 0usize, 0usize);
+
+    for (a, c, t) in [
+        (u_x, u_yc, -EDGE_EPS),
+        (v_x, v_yc, -EDGE_EPS),
+        (-(u_x + v_x), -(u_yc + v_yc), -1.0 - EDGE_EPS),
+    ] {
+        if a == 0.0 {
+            flat[n_flat] = FlatBound { c, t };
+            n_flat += 1;
+            continue;
+        }
+        let inv_a = 1.0 / a;
+        let step = -c * inv_a;
+        let bound = EdgeBound {
+            at: t * inv_a + step * dy_start,
+            step,
+        };
+        if a > 0.0 {
+            lower[n_lower] = bound;
+            n_lower += 1;
+        } else {
+            upper[n_upper] = bound;
+            n_upper += 1;
+        }
     }
-    let inv_denom = 1.0 / denom;
 
-    let u_x_step = (v1[1] - v2[1]) * inv_denom;
-    let v_x_step = (v2[1] - v0[1]) * inv_denom;
-    let u_y_coeff = (v2[0] - v1[0]) * inv_denom;
-    let v_y_coeff = (v0[0] - v2[0]) * inv_denom;
+    for py in y_start..=y_end {
+        let dy = py as f64 + 0.5 - v2[1];
 
-    for py in min_y..=max_y {
-        let pf_y = py as f64 + 0.5;
-        let dy = pf_y - v2[1];
-        let u_y = u_y_coeff * dy;
-        let v_y = v_y_coeff * dy;
+        // Constraints independent of x either admit the whole scanline or none
+        // of it.
+        let scanline_live = flat[..n_flat].iter().all(|f| f.c * dy >= f.t);
 
-        for px in min_x..=max_x {
-            let pf_x = px as f64 + 0.5;
-            let dx = pf_x - v2[0];
+        if scanline_live {
+            let mut lo = f64::NEG_INFINITY;
+            for b in &lower[..n_lower] {
+                if b.at > lo {
+                    lo = b.at;
+                }
+            }
+            let mut hi = f64::INFINITY;
+            for b in &upper[..n_upper] {
+                if b.at < hi {
+                    hi = b.at;
+                }
+            }
 
-            let u = u_x_step * dx + u_y;
-            let v = v_x_step * dx + v_y;
-            let w = 1.0 - u - v;
+            if lo <= hi {
+                // dx is measured from v2[0] at pixel centres, so
+                // px = dx + v2[0] - 0.5.  Widen by one pixel each way; the
+                // exact test below still decides.
+                let x_start = span_start(lo + v2[0] - 0.5, tri.min_x);
+                let x_end = span_end(hi + v2[0] - 0.5, tri.max_x);
 
-            if u >= -1e-6 && v >= -1e-6 && w >= -1e-6 {
-                let z = (u * v0[2] + v * v1[2] + w * v2[2]) as f32;
-                let lx = px - tx;
-                let ly = py - ty;
-                let ti = ly * tw + lx;
-                if z < depth[ti] {
-                    depth[ti] = z;
-                    color[ti] = tri.shaded;
+                if x_start <= x_end {
+                    let u_y = u_yc * dy;
+                    let v_y = v_yc * dy;
+                    let base = (py - y0) * px_w;
+                    for px in x_start..=x_end {
+                        let dx = px as f64 + 0.5 - v2[0];
+                        let u = u_x * dx + u_y;
+                        let v = v_x * dx + v_y;
+                        let w = 1.0 - u - v;
+
+                        if u >= -EDGE_EPS && v >= -EDGE_EPS && w >= -EDGE_EPS {
+                            let z = (u * v0[2] + v * v1[2] + w * v2[2]) as f32;
+                            let i = base + px;
+                            if z < depth[i] {
+                                depth[i] = z;
+                                color[i] = tri.shaded;
+                            }
+                        }
+                    }
                 }
             }
         }
+
+        for b in &mut lower[..n_lower] {
+            b.at += b.step;
+        }
+        for b in &mut upper[..n_upper] {
+            b.at += b.step;
+        }
     }
+}
+
+/// First pixel column to test, never above `floor` and never below 0.
+/// A NaN or infinite bound falls back to the triangle's bounding box.
+#[inline]
+fn span_start(x: f64, floor_x: usize) -> usize {
+    if x.is_nan() {
+        return floor_x;
+    }
+    // Rust saturates out-of-range float-to-int casts, so this is safe for +-inf.
+    let i = x.floor() as isize;
+    i.max(floor_x as isize) as usize
+}
+
+/// Last pixel column to test, never beyond `ceil_x`.
+#[inline]
+fn span_end(x: f64, ceil_x: usize) -> usize {
+    if x.is_nan() {
+        return ceil_x;
+    }
+    let i = x.ceil() as isize;
+    if i < 0 {
+        return 0;
+    }
+    (i as usize).min(ceil_x)
 }
 
 /// Render backbone CA trace to framebuffer.

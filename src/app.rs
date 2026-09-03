@@ -13,6 +13,64 @@ use crate::render::ribbon::{RibbonTriangle, generate_ribbon_mesh};
 /// optimizations (background interface analysis, backbone default, reduced LOD).
 pub const LARGE_STRUCTURE_THRESHOLD: usize = 5000;
 
+/// Upper bound on the FullHD framebuffer, in pixels.
+///
+/// A graphics-protocol viewport is sized in *device* pixels, so on a HiDPI
+/// panel it is four times the area the cell grid suggests, and every per-pixel
+/// stage scales with it.  This caps the still-frame resolution on very large or
+/// very dense displays; below the cap the render stays at native resolution, so
+/// a normal window is unaffected.  4 MP covers a full-screen Retina laptop.
+pub const FULLHD_MAX_PIXELS: f64 = 4_000_000.0;
+
+/// Resolution multiplier used while the camera is moving.
+///
+/// Halving each axis quarters every per-pixel cost, and the terminal scales the
+/// result back up via the protocol's `c=`/`r=` keys.  Motion hides the
+/// softness; the full-resolution frame lands as soon as the camera settles.
+pub const FULLHD_INTERACTIVE_SCALE: f64 = 0.5;
+
+/// How long after the last camera change the view still counts as interacting.
+///
+/// Long enough to cover the gap between key repeats, so held keys never
+/// oscillate between resolutions, and short enough that the sharp frame feels
+/// immediate once the user stops.
+pub const INTERACTION_LINGER: std::time::Duration = std::time::Duration::from_millis(220);
+
+/// Still-frame pixel dimensions of the FullHD framebuffer for a viewport of
+/// `vp_cols` by `vp_rows` cells.
+///
+/// This is the single source of truth for FullHD sizing: both the zoom
+/// calculation and the renderer go through it, so the framebuffer and the zoom
+/// computed for it can never disagree.  While the camera is moving the renderer
+/// scales this down by [`FULLHD_INTERACTIVE_SCALE`]; the still-frame size is
+/// what zoom is defined against.
+pub fn fullhd_framebuffer_size(
+    vp_cols: f64,
+    vp_rows: f64,
+    font_w: u16,
+    font_h: u16,
+    is_graphics: bool,
+) -> (f64, f64) {
+    if !is_graphics {
+        // Colored-braille fallback: 2x4 dots per cell.
+        return (vp_cols * 2.0, vp_rows * 4.0);
+    }
+
+    let native_w = vp_cols * f64::from(font_w);
+    let native_h = vp_rows * f64::from(font_h);
+
+    // Cap by area rather than by either axis, so ultrawide and tall windows are
+    // treated alike.
+    let area = native_w * native_h;
+    let scale = if area > FULLHD_MAX_PIXELS {
+        (FULLHD_MAX_PIXELS / area).sqrt()
+    } else {
+        1.0
+    };
+
+    ((native_w * scale).max(1.0), (native_h * scale).max(1.0))
+}
+
 /// Visualization mode
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VizMode {
@@ -148,9 +206,15 @@ pub struct App {
     interface_computed: bool,
     /// Receiver for background interface analysis (large structures only).
     interface_rx: Option<mpsc::Receiver<InterfaceAnalysis>>,
-    /// Cached result of `total_residues > LARGE_STRUCTURE_THRESHOLD`, set once
-    /// in `App::new` to avoid per-frame O(n) `residue_count()` calls.
-    pub is_large: bool,
+    /// When the user last moved the camera, driving `is_interacting`.
+    /// `None` until the first camera change.
+    last_camera_change: Option<std::time::Instant>,
+    /// Whether the terminal accepted a shared-memory graphics transmission at
+    /// startup.  Set once by the probe in `main`; `false` over SSH.
+    pub kitty_shm: bool,
+    /// Next shared-memory slot to hand the terminal.  A `Cell` because the
+    /// viewport renders from `&App` but each frame needs its own object.
+    shm_slot: std::cell::Cell<u32>,
 }
 
 impl App {
@@ -292,7 +356,9 @@ impl App {
             residue_colors,
             interface_computed,
             interface_rx,
-            is_large,
+            last_camera_change: None,
+            kitty_shm: false,
+            shm_slot: std::cell::Cell::new(0),
         }
     }
 
@@ -463,11 +529,35 @@ impl App {
         self.protein.chains.iter().map(|c| c.id.clone()).collect()
     }
 
-    /// Returns `true` when the scene is being actively animated (e.g. auto-rotate).
-    /// Used to trigger half-resolution rendering in FullHD mode for smoother
-    /// frame rates on large structures.
+    /// Returns `true` while the view is moving — auto-rotating, or within
+    /// [`INTERACTION_LINGER`] of the last manual camera change.
+    ///
+    /// FullHD renders at reduced resolution whenever this holds, so rotating,
+    /// panning and zooming stay smooth; the full-resolution frame is drawn once
+    /// the camera settles.
     pub fn is_interacting(&self) -> bool {
-        self.camera.auto_rotate
+        if self.camera.auto_rotate {
+            return true;
+        }
+        self.last_camera_change
+            .is_some_and(|at| at.elapsed() < INTERACTION_LINGER)
+    }
+
+    /// Claim the next shared-memory slot, cycling through the ring so the
+    /// terminal is never still reading the object we are about to replace.
+    pub fn next_shm_slot(&self) -> u32 {
+        let slot = self.shm_slot.get();
+        self.shm_slot
+            .set((slot + 1) % crate::render::kitty_shm::SLOTS);
+        slot
+    }
+
+    /// Record that the user just moved the camera.
+    ///
+    /// Called by the input loop for every key that rotates, pans, zooms or
+    /// resets the view.
+    pub fn note_camera_change(&mut self) {
+        self.last_camera_change = Some(std::time::Instant::now());
     }
 
     pub fn tick(&mut self) {
@@ -500,14 +590,13 @@ impl App {
         let (px_w, px_h) = match self.render_mode {
             RenderMode::FullHD => {
                 let proto = self.picker.protocol_type();
-                if proto != ratatui_image::picker::ProtocolType::Halfblocks
+                let is_graphics = proto != ratatui_image::picker::ProtocolType::Halfblocks
                     && font_w > 0
-                    && font_h > 0
-                {
-                    (vp_cols * font_w as f64, vp_rows * font_h as f64)
-                } else {
-                    (vp_cols * 2.0, vp_rows * 4.0)
-                }
+                    && font_h > 0;
+                // Zoom is defined against the still-frame resolution; the
+                // renderer scales the camera itself when it drops to the
+                // interactive resolution.
+                fullhd_framebuffer_size(vp_cols, vp_rows, font_w, font_h, is_graphics)
             }
             RenderMode::HalfBlock | RenderMode::HalfBlockPlus => (vp_cols * 2.0, vp_rows * 4.0),
             RenderMode::Braille => (vp_cols * 2.0, vp_rows * 4.0),
@@ -552,5 +641,69 @@ impl App {
         }
 
         self.recalculate_zoom(term_cols, term_rows);
+    }
+}
+
+#[cfg(test)]
+mod fullhd_sizing_tests {
+    use super::*;
+
+    /// A full-screen kitty at font_size 14 on a 2560x1600 Retina panel.
+    const RETINA: (f64, f64, u16, u16) = (150.0, 41.0, 17, 35);
+
+    #[test]
+    fn native_resolution_is_used_below_the_cap() {
+        let (cols, rows, fw, fh) = RETINA;
+        let (w, h) = fullhd_framebuffer_size(cols, rows, fw, fh, true);
+        assert_eq!((w, h), (cols * f64::from(fw), rows * f64::from(fh)));
+        assert!(
+            w * h <= FULLHD_MAX_PIXELS,
+            "{w}x{h} should be under the cap"
+        );
+    }
+
+    #[test]
+    fn oversized_viewports_are_capped_by_area_and_keep_their_aspect() {
+        // A 5K display: well past the cap.
+        let (native_w, native_h) = (5120.0, 2880.0);
+        let (w, h) = fullhd_framebuffer_size(5120.0, 2880.0, 1, 1, true);
+
+        assert!(
+            w * h <= FULLHD_MAX_PIXELS * 1.001,
+            "{w}x{h} = {} px exceeds the cap",
+            w * h
+        );
+        let aspect_error = (w / h) - (native_w / native_h);
+        assert!(
+            aspect_error.abs() < 1e-6,
+            "aspect drifted by {aspect_error}"
+        );
+    }
+
+    #[test]
+    fn braille_fallback_ignores_font_size() {
+        let (w, h) = fullhd_framebuffer_size(100.0, 40.0, 17, 35, false);
+        assert_eq!((w, h), (200.0, 160.0));
+    }
+
+    #[test]
+    fn dimensions_never_collapse_to_zero() {
+        let (w, h) = fullhd_framebuffer_size(0.0, 0.0, 17, 35, true);
+        assert!(w >= 1.0 && h >= 1.0, "got {w}x{h}");
+    }
+
+    #[test]
+    fn interactive_scale_quarters_the_pixel_count() {
+        let (cols, rows, fw, fh) = RETINA;
+        let (still_w, still_h) = fullhd_framebuffer_size(cols, rows, fw, fh, true);
+        let (moving_w, moving_h) = (
+            still_w * FULLHD_INTERACTIVE_SCALE,
+            still_h * FULLHD_INTERACTIVE_SCALE,
+        );
+        let ratio = (still_w * still_h) / (moving_w * moving_h);
+        assert!(
+            (ratio - 4.0).abs() < 1e-9,
+            "expected 4x fewer pixels, got {ratio}"
+        );
     }
 }

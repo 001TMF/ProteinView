@@ -1,8 +1,8 @@
 use image::{RgbImage, RgbaImage};
-use rayon::prelude::*;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use rayon::prelude::*;
 
 /// RGB pixel framebuffer with z-buffer for software rasterization.
 ///
@@ -207,18 +207,18 @@ impl Framebuffer {
             .par_iter_mut()
             .zip(self.depth.par_iter())
             .for_each(|(c, &d)| {
-            if d >= f32::INFINITY {
-                return; // background pixel — leave black
-            }
-            let t = ((d - z_min) * inv_range).clamp(0.0, 1.0);
-            let blend = t as f64 * fog_strength;
-            c[0] =
-                (c[0] as f64 + (fog_color[0] as f64 - c[0] as f64) * blend).clamp(0.0, 255.0) as u8;
-            c[1] =
-                (c[1] as f64 + (fog_color[1] as f64 - c[1] as f64) * blend).clamp(0.0, 255.0) as u8;
-            c[2] =
-                (c[2] as f64 + (fog_color[2] as f64 - c[2] as f64) * blend).clamp(0.0, 255.0) as u8;
-        });
+                if d >= f32::INFINITY {
+                    return; // background pixel — leave black
+                }
+                let t = ((d - z_min) * inv_range).clamp(0.0, 1.0);
+                let blend = t as f64 * fog_strength;
+                c[0] = (c[0] as f64 + (fog_color[0] as f64 - c[0] as f64) * blend).clamp(0.0, 255.0)
+                    as u8;
+                c[1] = (c[1] as f64 + (fog_color[1] as f64 - c[1] as f64) * blend).clamp(0.0, 255.0)
+                    as u8;
+                c[2] = (c[2] as f64 + (fog_color[2] as f64 - c[2] as f64) * blend).clamp(0.0, 255.0)
+                    as u8;
+            });
     }
 
     /// Cohen-Sutherland line clipping against framebuffer bounds [0, width) x [0, height).
@@ -1482,7 +1482,10 @@ mod tests {
             1,
         );
 
-        assert_eq!(unquantized, cols, "every cell should differ without quantization");
+        assert_eq!(
+            unquantized, cols,
+            "every cell should differ without quantization"
+        );
         assert!(
             quantized < unquantized,
             "quantization should merge runs (got {quantized}, unquantized {unquantized})"

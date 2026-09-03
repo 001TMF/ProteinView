@@ -15,12 +15,20 @@ pub const LARGE_STRUCTURE_THRESHOLD: usize = 5000;
 
 /// Upper bound on the FullHD framebuffer, in pixels.
 ///
-/// A graphics-protocol viewport is sized in *device* pixels, so on a HiDPI
-/// panel it is four times the area the cell grid suggests, and every per-pixel
-/// stage scales with it.  This caps the still-frame resolution on very large or
-/// very dense displays; below the cap the render stays at native resolution, so
-/// a normal window is unaffected.  4 MP covers a full-screen Retina laptop.
-pub const FULLHD_MAX_PIXELS: f64 = 4_000_000.0;
+/// A graphics-protocol viewport is sized in *device* pixels, so on a HiDPI panel
+/// it is several times the area the cell grid suggests, and every per-pixel
+/// stage scales with it.  This is a backstop against a framebuffer so large it
+/// costs real memory, not a frame-rate control: a still frame is rendered once
+/// and then the loop idles, and everything drawn *while* the view moves is
+/// already quartered by [`FULLHD_INTERACTIVE_SCALE`].
+///
+/// Set it generously, because capping is not free.  The terminal scales the
+/// result back up, and a cap that barely engages buys a few percent of the
+/// pixels in exchange for a non-integer resample of every still frame — worse
+/// output for no useful saving.  12 MP clears a 4K viewport and a full-screen
+/// HiDPI laptop with room to spare, so the cap only meets 5K and above, where
+/// the framebuffer would otherwise run past a hundred megabytes.
+pub const FULLHD_MAX_PIXELS: f64 = 12_000_000.0;
 
 /// Resolution multiplier used while the camera is moving.
 ///
@@ -648,8 +656,9 @@ impl App {
 mod fullhd_sizing_tests {
     use super::*;
 
-    /// A full-screen kitty at font_size 14 on a 2560x1600 Retina panel.
-    const RETINA: (f64, f64, u16, u16) = (150.0, 41.0, 17, 35);
+    /// Measured: a full-screen kitty at font_size 14 on a 2560x1600 Retina
+    /// panel reports 20x43 device-pixel cells over a 144x36 viewport.
+    const RETINA: (f64, f64, u16, u16) = (144.0, 36.0, 20, 43);
 
     #[test]
     fn native_resolution_is_used_below_the_cap() {
@@ -662,11 +671,31 @@ mod fullhd_sizing_tests {
         );
     }
 
+    /// Regression: the cap was first set at 4 MP, which a real full-screen
+    /// HiDPI laptop viewport (4.46 MP) tripped by 10% — paying a non-integer
+    /// upscale of every still frame to save almost nothing.
+    #[test]
+    fn a_full_screen_hidpi_laptop_is_not_capped() {
+        let (cols, rows, fw, fh) = RETINA;
+        let native = cols * f64::from(fw) * rows * f64::from(fh);
+        assert!(
+            native < FULLHD_MAX_PIXELS,
+            "{native} px viewport should render natively, cap is {FULLHD_MAX_PIXELS}"
+        );
+    }
+
+    /// A 4K viewport should also pass through untouched.
+    #[test]
+    fn a_4k_viewport_is_not_capped() {
+        let (w, h) = fullhd_framebuffer_size(3840.0, 2160.0, 1, 1, true);
+        assert_eq!((w, h), (3840.0, 2160.0));
+    }
+
     #[test]
     fn oversized_viewports_are_capped_by_area_and_keep_their_aspect() {
-        // A 5K display: well past the cap.
-        let (native_w, native_h) = (5120.0, 2880.0);
-        let (w, h) = fullhd_framebuffer_size(5120.0, 2880.0, 1, 1, true);
+        // A 6K display: well past the cap.
+        let (native_w, native_h) = (6016.0, 3384.0);
+        let (w, h) = fullhd_framebuffer_size(6016.0, 3384.0, 1, 1, true);
 
         assert!(
             w * h <= FULLHD_MAX_PIXELS * 1.001,

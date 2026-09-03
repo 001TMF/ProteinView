@@ -47,6 +47,11 @@ pub enum RenderMode {
     /// HD-quality colored braille via software rasterizer (Lambert shading,
     /// z-buffer, depth fog).  Fast everywhere including SSH.
     HalfBlock,
+    /// Same 2x4 braille grid as [`RenderMode::HalfBlock`], but rasterized into a
+    /// supersampled framebuffer and box-filtered back down, with color
+    /// quantization applied during the conversion.  Anti-aliased silhouettes and
+    /// stable per-cell color, for the same number of characters on the wire.
+    HalfBlockPlus,
     /// Full pixel graphics via Sixel/Kitty/iTerm2 - best quality, high bandwidth
     FullHD,
 }
@@ -56,6 +61,7 @@ impl RenderMode {
         match self {
             Self::Braille => "Braille",
             Self::HalfBlock => "HD",
+            Self::HalfBlockPlus => "HDplus",
             Self::FullHD => "FullHD",
         }
     }
@@ -187,7 +193,7 @@ impl App {
                 };
                 0.9 * px_w.min(px_h) / (2.0 * radius)
             }
-            RenderMode::HalfBlock => {
+            RenderMode::HalfBlock | RenderMode::HalfBlockPlus => {
                 let px_w = vp_cols * 2.0;
                 let px_h = vp_rows * 4.0;
                 0.9 * px_w.min(px_h) / (2.0 * radius)
@@ -503,19 +509,20 @@ impl App {
                     (vp_cols * 2.0, vp_rows * 4.0)
                 }
             }
-            RenderMode::HalfBlock => (vp_cols * 2.0, vp_rows * 4.0),
+            RenderMode::HalfBlock | RenderMode::HalfBlockPlus => (vp_cols * 2.0, vp_rows * 4.0),
             RenderMode::Braille => (vp_cols * 2.0, vp_rows * 4.0),
         };
         self.camera.zoom = 0.9 * px_w.min(px_h) / (2.0 * radius);
     }
 
-    /// Cycle lower render tiers: Braille -> HalfBlock -> Braille.
-    /// From FullHD, steps down to HalfBlock (next lower tier).
+    /// Cycle lower render tiers: Braille -> HD -> HDplus -> Braille.
+    /// From FullHD, steps down to HD (next lower tier).
     /// Bound to `m`.
     pub fn toggle_hd(&mut self, term_cols: u16, term_rows: u16) {
         self.render_mode = match self.render_mode {
             RenderMode::Braille => RenderMode::HalfBlock,
-            RenderMode::HalfBlock => RenderMode::Braille,
+            RenderMode::HalfBlock => RenderMode::HalfBlockPlus,
+            RenderMode::HalfBlockPlus => RenderMode::Braille,
             RenderMode::FullHD => RenderMode::HalfBlock,
         };
         // Dismiss any stale SSH warning (no longer in FullHD)

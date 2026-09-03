@@ -48,7 +48,7 @@ struct Cli {
     #[arg(long, alias = "pixel")]
     fullhd: bool,
 
-    /// Render mode: braille, halfblock (or hd), fullhd (or pixel)
+    /// Render mode: braille, halfblock (or hd), hdplus (or hd+), fullhd (or pixel)
     #[arg(long = "render", value_name = "MODE")]
     render_mode: Option<String>,
 
@@ -206,6 +206,7 @@ fn main() -> Result<()> {
         match mode_str.to_ascii_lowercase().as_str() {
             "braille" => RenderMode::Braille,
             "halfblock" | "hd" | "half-block" => RenderMode::HalfBlock,
+            "hdplus" | "hd+" | "halfblockplus" | "half-block-plus" => RenderMode::HalfBlockPlus,
             "fullhd" | "pixel" | "full-hd" => RenderMode::FullHD,
             _ => {
                 eprintln!("Warning: unknown render mode '{}', using default", mode_str);

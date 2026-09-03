@@ -772,15 +772,37 @@ pub fn framebuffer_to_widget(fb: &Framebuffer) -> Paragraph<'static> {
 /// per-cell (rather than per-pixel) coloring.
 ///
 /// Consecutive cells with the same foreground color are merged into a single
-/// [`Span`] for performance (run-length encoding).  Color quantization is
-/// available via `quant_step` but currently disabled (`quant_step = 1`, a
-/// no-op).  Set it to e.g. 4 or 8 to reduce distinct colors and increase
-/// run-length merging at the expense of color precision.
-#[allow(clippy::needless_range_loop)]
+/// [`Span`] for performance (run-length encoding).
 pub fn framebuffer_to_braille_widget(fb: &Framebuffer) -> Paragraph<'static> {
+    framebuffer_to_braille_widget_ssaa(fb, 1, 1)
+}
+
+/// Supersampled variant of [`framebuffer_to_braille_widget`].
+///
+/// The framebuffer is expected to have dimensions `(cols * 2 * ssaa, rows * 4 *
+/// ssaa)`, so that each braille dot is backed by an `ssaa x ssaa` block of
+/// samples rather than a single pixel.  Each block is box-filtered: the dot is
+/// lit once the block is at least half covered, and the cell's foreground color
+/// averages every covered sample of its lit dots.  This anti-aliases silhouettes
+/// and keeps colors stable as the camera rotates, at no cost in emitted bytes --
+/// the widget is still exactly `cols x rows` braille characters.
+///
+/// `quant_step` rounds each channel to a multiple of `step` before run-length
+/// merging; `1` disables it.  Larger values merge many more cells into a single
+/// [`Span`], which cuts the number of SGR color escapes written to the terminal
+/// -- the dominant cost of this render path over SSH -- at a small loss of color
+/// precision.
+#[allow(clippy::needless_range_loop)]
+pub fn framebuffer_to_braille_widget_ssaa(
+    fb: &Framebuffer,
+    ssaa: usize,
+    quant_step: u8,
+) -> Paragraph<'static> {
+    let ssaa = ssaa.max(1);
+
     // Terminal cell grid dimensions derived from the framebuffer.
-    let term_cols = fb.width.div_ceil(2);
-    let term_rows = fb.height.div_ceil(4);
+    let term_cols = fb.width.div_ceil(2 * ssaa);
+    let term_rows = fb.height.div_ceil(4 * ssaa);
 
     if term_cols == 0 || term_rows == 0 {
         return Paragraph::new("");
@@ -798,7 +820,11 @@ pub fn framebuffer_to_braille_widget(fb: &Framebuffer) -> Paragraph<'static> {
         [0x08, 0x10, 0x20, 0x80], // column 1: rows 0-3
     ];
 
-    let quant_step: u8 = 1;
+    // Samples backing one braille dot, and the coverage needed to light it.
+    // At `ssaa == 1` the threshold is 1, i.e. "any non-black pixel lights the
+    // dot" -- identical to the non-supersampled behaviour.
+    let samples_per_dot = ssaa * ssaa;
+    let coverage_threshold = samples_per_dot.div_ceil(2) as u32;
 
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(term_rows);
 
@@ -833,22 +859,40 @@ pub fn framebuffer_to_braille_widget(fb: &Framebuffer) -> Paragraph<'static> {
             let mut on_count: u32 = 0;
 
             for (dx, col_bits) in BRAILLE_BITS.iter().enumerate() {
-                let px = px_base + dx;
-                if px >= fb.width {
+                let sx0 = (px_base + dx) * ssaa;
+                if sx0 >= fb.width {
                     continue;
                 }
                 for (dy, &bit) in col_bits.iter().enumerate() {
-                    let py = py_base + dy;
-                    if py >= fb.height {
+                    let sy0 = (py_base + dy) * ssaa;
+                    if sy0 >= fb.height {
                         continue;
                     }
-                    let c = fb.color[py * fb.width + px];
-                    if c != [0, 0, 0] {
+
+                    // Box-filter the sample block backing this dot.
+                    let mut covered: u32 = 0;
+                    let mut r: u32 = 0;
+                    let mut g: u32 = 0;
+                    let mut b: u32 = 0;
+                    for sy in sy0..(sy0 + ssaa).min(fb.height) {
+                        let row = sy * fb.width;
+                        for sx in sx0..(sx0 + ssaa).min(fb.width) {
+                            let c = fb.color[row + sx];
+                            if c != [0, 0, 0] {
+                                covered += 1;
+                                r += c[0] as u32;
+                                g += c[1] as u32;
+                                b += c[2] as u32;
+                            }
+                        }
+                    }
+
+                    if covered >= coverage_threshold {
                         bits |= bit;
-                        r_sum += c[0] as u32;
-                        g_sum += c[1] as u32;
-                        b_sum += c[2] as u32;
-                        on_count += 1;
+                        r_sum += r;
+                        g_sum += g;
+                        b_sum += b;
+                        on_count += covered;
                     }
                 }
             }
@@ -1269,5 +1313,150 @@ mod tests {
             "negative dash_len should draw solid (got {} pixels)",
             drawn
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Supersampled braille conversion
+    // ---------------------------------------------------------------------
+
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::widgets::Widget;
+
+    /// Render a widget into a cell buffer so the emitted glyphs and colors can
+    /// be inspected directly.
+    fn render_cells(widget: Paragraph<'static>, w: u16, h: u16) -> Buffer {
+        let area = Rect::new(0, 0, w, h);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+        buf
+    }
+
+    /// Count foreground-color changes along each row. This is the quantity that
+    /// drives how many SGR escape sequences reach the terminal, i.e. the
+    /// bandwidth cost of a frame.
+    fn color_runs(buf: &Buffer, w: u16, h: u16) -> usize {
+        let mut runs = 0;
+        for y in 0..h {
+            let mut prev: Option<Color> = None;
+            for x in 0..w {
+                let fg = buf[(x, y)].fg;
+                if prev != Some(fg) {
+                    runs += 1;
+                    prev = Some(fg);
+                }
+            }
+        }
+        runs
+    }
+
+    #[test]
+    fn ssaa_one_lights_a_dot_from_any_non_black_pixel() {
+        // At ssaa == 1 the coverage threshold is 1, preserving the original
+        // "any non-black pixel lights the dot" behaviour exactly.
+        let mut fb = Framebuffer::new(2, 4);
+        fb.color[0] = [255, 0, 0]; // dot (dx=0, dy=0) -> bit 0x01
+
+        let buf = render_cells(framebuffer_to_braille_widget(&fb), 1, 1);
+        let expected = char::from_u32(0x2800 + 0x01).unwrap().to_string();
+        assert_eq!(buf[(0, 0)].symbol(), expected);
+    }
+
+    #[test]
+    fn ssaa_dot_needs_half_coverage_to_light() {
+        // 4x8 framebuffer at ssaa = 2 is exactly one terminal cell: each of the
+        // 2x4 braille dots is backed by a 2x2 block of samples.
+        let mut fb = Framebuffer::new(4, 8);
+
+        // Dot (dx=0, dy=0) covers samples x in [0,2), y in [0,2).
+        // One covered sample out of four is 25% -- below threshold, stays dark.
+        fb.color[0] = [255, 0, 0];
+
+        // Dot (dx=1, dy=0) covers samples x in [2,4), y in [0,2).
+        // Two covered samples out of four is 50% -- lights up (bit 0x08).
+        fb.color[2] = [0, 255, 0];
+        fb.color[3] = [0, 255, 0];
+
+        let buf = render_cells(framebuffer_to_braille_widget_ssaa(&fb, 2, 1), 1, 1);
+        let expected = char::from_u32(0x2800 + 0x08).unwrap().to_string();
+        assert_eq!(
+            buf[(0, 0)].symbol(),
+            expected,
+            "only the half-covered dot should light"
+        );
+    }
+
+    #[test]
+    fn ssaa_grid_maps_to_the_same_cell_dimensions() {
+        // A supersampled framebuffer must still produce cols x rows cells --
+        // supersampling buys quality, never extra characters on the wire.
+        let (cols, rows, ssaa) = (7usize, 3usize, 2usize);
+        let fb = Framebuffer::new(cols * 2 * ssaa, rows * 4 * ssaa);
+
+        let plain = Framebuffer::new(cols * 2, rows * 4);
+        let a = render_cells(
+            framebuffer_to_braille_widget_ssaa(&fb, ssaa, 1),
+            cols as u16,
+            rows as u16,
+        );
+        let b = render_cells(
+            framebuffer_to_braille_widget(&plain),
+            cols as u16,
+            rows as u16,
+        );
+        assert_eq!(a, b, "ssaa must not change the emitted cell grid");
+    }
+
+    #[test]
+    fn quantization_merges_color_runs() {
+        // Eight cells whose colors differ by only 2 per channel -- the kind of
+        // near-identical neighbours supersampled shading produces.
+        let cols = 8usize;
+        let mut fb = Framebuffer::new(cols * 2, 4);
+        for cell in 0..cols {
+            for dx in 0..2 {
+                for dy in 0..4 {
+                    let idx = dy * fb.width + cell * 2 + dx;
+                    fb.color[idx] = [100 + 2 * cell as u8, 150, 200];
+                }
+            }
+        }
+
+        let unquantized = color_runs(
+            &render_cells(
+                framebuffer_to_braille_widget_ssaa(&fb, 1, 1),
+                cols as u16,
+                1,
+            ),
+            cols as u16,
+            1,
+        );
+        let quantized = color_runs(
+            &render_cells(
+                framebuffer_to_braille_widget_ssaa(&fb, 1, 8),
+                cols as u16,
+                1,
+            ),
+            cols as u16,
+            1,
+        );
+
+        assert_eq!(unquantized, cols, "every cell should differ without quantization");
+        assert!(
+            quantized < unquantized,
+            "quantization should merge runs (got {quantized}, unquantized {unquantized})"
+        );
+    }
+
+    #[test]
+    fn quantization_never_darkens_a_lit_cell_to_black() {
+        // A very dark but non-black cell must not quantize to black, which
+        // would make lit geometry invisible.
+        let mut fb = Framebuffer::new(2, 4);
+        for i in 0..fb.color.len() {
+            fb.color[i] = [1, 1, 1];
+        }
+        let buf = render_cells(framebuffer_to_braille_widget_ssaa(&fb, 1, 8), 1, 1);
+        assert_ne!(buf[(0, 0)].fg, Color::Rgb(0, 0, 0));
     }
 }

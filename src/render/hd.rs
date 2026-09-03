@@ -25,6 +25,41 @@ pub fn render_hd_framebuffer(
     show_ligands: bool,
     interactions: &[Interaction],
 ) -> Framebuffer {
+    render_hd_framebuffer_ssaa(
+        protein,
+        camera,
+        color_scheme,
+        viz_mode,
+        width,
+        height,
+        mesh,
+        show_ligands,
+        interactions,
+        1.0,
+    )
+}
+
+/// Like [`render_hd_framebuffer`], but aware that the caller intends to
+/// downsample the result by a factor of `ssaa` before display.
+///
+/// `width` / `height` are the *supersampled* framebuffer dimensions, i.e. the
+/// output resolution already multiplied by `ssaa`.  The factor is needed
+/// separately because line thickness and circle radii must be derived from the
+/// **output** resolution and then scaled up, so that features downsample to the
+/// same apparent size rather than becoming proportionally thinner.
+#[allow(clippy::too_many_arguments)]
+pub fn render_hd_framebuffer_ssaa(
+    protein: &Protein,
+    camera: &Camera,
+    color_scheme: &ColorScheme,
+    viz_mode: VizMode,
+    width: f64,
+    height: f64,
+    mesh: &[RibbonTriangle],
+    show_ligands: bool,
+    interactions: &[Interaction],
+    ssaa: f64,
+) -> Framebuffer {
     let px_w = width as usize;
     let px_h = height as usize;
     if px_w == 0 || px_h == 0 {
@@ -36,12 +71,23 @@ pub fn render_hd_framebuffer(
     let half_w = px_w as f64 / 2.0;
     let half_h = px_h as f64 / 2.0;
 
-    // Scale line thickness and circle radii relative to framebuffer size.
+    // Scale line thickness and circle radii relative to the *output* size.
     // Values were tuned at ~160px wide (braille resolution) where 1.5px
     // lines and circles look correct.  At FullHD (~640px+) we scale up
     // proportionally.  Floor of 1.0 preserves the original look at low
     // resolutions; ceiling of 3.0 caps growth on 4K terminals.
-    let ts = (px_w as f64 / 500.0).clamp(1.0, 3.0);
+    //
+    // When supersampling, the clamp must be evaluated against the resolution
+    // the user actually sees and only then multiplied by `ssaa`.  Deriving it
+    // from the supersampled width instead would let the clamp floor absorb the
+    // factor and render features too thin once downsampled.
+    let ssaa = if ssaa.is_finite() && ssaa >= 1.0 {
+        ssaa
+    } else {
+        1.0
+    };
+    let output_px_w = px_w as f64 / ssaa;
+    let ts = (output_px_w / 500.0).clamp(1.0, 3.0) * ssaa;
 
     // Pre-compute sin/cos once for the entire frame instead of per-vertex.
     let cache = camera.projection_cache();
@@ -562,5 +608,157 @@ fn interaction_color(t: InteractionType) -> [u8; 3] {
         InteractionType::SaltBridge => [255, 80, 80],   // red
         InteractionType::HydrophobicContact => [220, 200, 60], // yellow
         InteractionType::Other => [160, 160, 160],      // gray
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::protein::{Atom, Chain, MoleculeType, Residue, SecondaryStructure};
+    use crate::render::color::ColorSchemeType;
+
+    /// A short CA trace running diagonally across the view.
+    fn trace_protein() -> Protein {
+        let atom = |x: f64, y: f64| Atom {
+            name: "CA".to_string(),
+            element: "C".to_string(),
+            x,
+            y,
+            z: 0.0,
+            b_factor: 20.0,
+            is_backbone: true,
+            is_hetero: false,
+        };
+        let residues = (0..12)
+            .map(|i| Residue {
+                name: "ALA".to_string(),
+                seq_num: i + 1,
+                insertion_code: None,
+                atoms: vec![atom(i as f64 * 6.0 - 33.0, i as f64 * 3.0 - 16.0)],
+                secondary_structure: SecondaryStructure::Coil,
+            })
+            .collect();
+        Protein {
+            name: "trace".to_string(),
+            chains: vec![Chain {
+                id: "A".to_string(),
+                residues,
+                molecule_type: MoleculeType::Protein,
+            }],
+            ligands: Vec::new(),
+        }
+    }
+
+    /// Fraction of framebuffer pixels carrying geometry.
+    fn ink_fraction(fb: &Framebuffer) -> f64 {
+        let lit = fb.color.iter().filter(|c| **c != [0, 0, 0]).count();
+        lit as f64 / fb.color.len() as f64
+    }
+
+    /// Bounding box of lit pixels, expressed as fractions of the framebuffer
+    /// dimensions.  This is the protein's *apparent* size: what the viewer sees
+    /// once the buffer is downsampled onto the terminal cell grid.
+    fn normalized_bbox(fb: &Framebuffer) -> (f64, f64) {
+        let (mut min_x, mut max_x) = (usize::MAX, 0usize);
+        let (mut min_y, mut max_y) = (usize::MAX, 0usize);
+        for y in 0..fb.height {
+            for x in 0..fb.width {
+                if fb.color[y * fb.width + x] != [0, 0, 0] {
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+        assert!(min_x != usize::MAX, "fixture should draw something");
+        (
+            (max_x - min_x) as f64 / fb.width as f64,
+            (max_y - min_y) as f64 / fb.height as f64,
+        )
+    }
+
+    /// Render the fixture the way the viewport does: the framebuffer is scaled
+    /// by `ssaa`, and the camera is scaled to match because zoom and pan are
+    /// both in framebuffer pixel units.
+    fn render_trace(out_w: f64, out_h: f64, ssaa: f64) -> Framebuffer {
+        let protein = trace_protein();
+        let mut camera = Camera::default();
+        camera.zoom = 4.0 * ssaa;
+        let scheme = ColorScheme::new(ColorSchemeType::Structure, 12);
+        render_hd_framebuffer_ssaa(
+            &protein,
+            &camera,
+            &scheme,
+            VizMode::Backbone,
+            out_w * ssaa,
+            out_h * ssaa,
+            &[],
+            false,
+            &[],
+            ssaa,
+        )
+    }
+
+    #[test]
+    fn supersampling_preserves_apparent_size() {
+        // HDplus must render the protein at the same apparent size as HD.
+        // Scaling the framebuffer by `ssaa` without scaling the camera would
+        // leave the protein covering the same pixel count in a buffer twice as
+        // wide, i.e. half the size once downsampled.
+        let (bw, bh) = normalized_bbox(&render_trace(400.0, 184.0, 1.0));
+        let (pw, ph) = normalized_bbox(&render_trace(400.0, 184.0, 2.0));
+
+        assert!(
+            (pw - bw).abs() < 0.02 && (ph - bh).abs() < 0.02,
+            "supersampled extent ({pw:.3}, {ph:.3}) should match base ({bw:.3}, {bh:.3})"
+        );
+    }
+
+    #[test]
+    fn supersampling_preserves_apparent_line_thickness() {
+        // Line thickness must be derived from the *output* resolution and then
+        // scaled by the supersampling factor, so strokes occupy the same
+        // fraction of the frame.  Deriving it from the supersampled width
+        // instead lets the clamp floor in `ts` absorb the factor and renders
+        // strokes too thin once downsampled.
+        let base = ink_fraction(&render_trace(400.0, 184.0, 1.0));
+        let supersampled = ink_fraction(&render_trace(400.0, 184.0, 2.0));
+
+        let ratio = supersampled / base;
+        assert!(
+            (0.9..=1.1).contains(&ratio),
+            "supersampled ink fraction {supersampled:.4} should match base {base:.4} within 10% (ratio {ratio:.3})"
+        );
+    }
+
+    #[test]
+    fn ssaa_factor_is_ignored_when_invalid() {
+        // Guards against a NaN or sub-1 factor silently collapsing thickness.
+        let protein = trace_protein();
+        let mut camera = Camera::default();
+        camera.zoom = 4.0;
+        let scheme = ColorScheme::new(ColorSchemeType::Structure, 12);
+        let render = |ssaa: f64| {
+            render_hd_framebuffer_ssaa(
+                &protein,
+                &camera,
+                &scheme,
+                VizMode::Backbone,
+                400.0,
+                184.0,
+                &[],
+                false,
+                &[],
+                ssaa,
+            )
+        };
+        let expected = ink_fraction(&render(1.0));
+        for bad in [f64::NAN, 0.0, -3.0] {
+            assert!(
+                (ink_fraction(&render(bad)) - expected).abs() < 1e-9,
+                "ssaa {bad} should fall back to 1.0"
+            );
+        }
     }
 }

@@ -60,7 +60,7 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("  m          ", Style::default().fg(Color::Yellow)),
-            Span::raw("Toggle Braille / HD"),
+            Span::raw("Cycle Braille / HD / HDplus"),
         ]),
         Line::from(vec![
             Span::styled("  M          ", Style::default().fg(Color::Yellow)),

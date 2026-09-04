@@ -6,6 +6,7 @@ use ratatui_image::{Image, Resize};
 
 use crate::app::{self, App, ConnectionType, RenderMode};
 use crate::model::interface::Interaction;
+use crate::model::residue_selection::SelectionView;
 use crate::render::braille;
 use crate::render::framebuffer::{
     Framebuffer, framebuffer_to_braille_widget, framebuffer_to_braille_widget_ssaa,
@@ -43,6 +44,14 @@ fn hd_quant_step(connection: ConnectionType) -> u8 {
     }
 }
 
+/// The selection overlay for this frame, or `None` when nothing is picked.
+fn selection_view(app: &App) -> Option<SelectionView<'_>> {
+    (!app.selection.is_empty()).then_some(SelectionView {
+        selection: &app.selection,
+        ball_and_stick: app.show_ball_stick,
+    })
+}
+
 /// Render the main 3D viewport
 pub fn render_viewport(frame: &mut Frame, area: Rect, app: &App) {
     let interactions: &[Interaction] = if app.show_interface && app.show_interactions {
@@ -50,6 +59,7 @@ pub fn render_viewport(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         &[]
     };
+    let selection = selection_view(app);
 
     match app.render_mode {
         RenderMode::Braille => {
@@ -66,6 +76,7 @@ pub fn render_viewport(frame: &mut Frame, area: Rect, app: &App) {
                 height,
                 app.show_ligands,
                 interactions,
+                selection,
             );
 
             frame.render_widget(canvas, area);
@@ -88,16 +99,17 @@ pub fn render_viewport(frame: &mut Frame, area: Rect, app: &App) {
                 &app.mesh_cache,
                 app.show_ligands,
                 interactions,
+                selection,
             );
 
             let widget = framebuffer_to_braille_widget(&fb);
             frame.render_widget(widget, area);
         }
         RenderMode::HalfBlockPlus => {
-            render_hdplus_viewport(frame, area, app, interactions);
+            render_hdplus_viewport(frame, area, app, interactions, selection);
         }
         RenderMode::FullHD => {
-            render_fullhd_viewport(frame, area, app, interactions);
+            render_fullhd_viewport(frame, area, app, interactions, selection);
         }
     }
 }
@@ -111,7 +123,13 @@ pub fn render_viewport(frame: &mut Frame, area: Rect, app: &App) {
 /// sampled pixel, which stops thin ribbons from crawling between dots as the
 /// camera rotates.  The emitted character grid is identical to HD's, so the cost
 /// on the wire is unchanged.
-fn render_hdplus_viewport(frame: &mut Frame, area: Rect, app: &App, interactions: &[Interaction]) {
+fn render_hdplus_viewport(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    interactions: &[Interaction],
+    selection: Option<SelectionView<'_>>,
+) {
     let ssaa = HD_SSAA as f64;
 
     // The framebuffer is supersampled, so the camera must be scaled to match --
@@ -136,6 +154,7 @@ fn render_hdplus_viewport(frame: &mut Frame, area: Rect, app: &App, interactions
         &app.mesh_cache,
         app.show_ligands,
         interactions,
+        selection,
         ssaa,
     );
 
@@ -146,7 +165,13 @@ fn render_hdplus_viewport(frame: &mut Frame, area: Rect, app: &App, interactions
 
 /// Render the FullHD viewport using a graphics protocol (Kitty/Sixel/iTerm2)
 /// when available, falling back to colored braille characters otherwise.
-fn render_fullhd_viewport(frame: &mut Frame, area: Rect, app: &App, interactions: &[Interaction]) {
+fn render_fullhd_viewport(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    interactions: &[Interaction],
+    selection: Option<SelectionView<'_>>,
+) {
     let proto = app.picker.protocol_type();
     let (font_w, font_h) = app.picker.font_size();
     let is_graphics = proto != ProtocolType::Halfblocks && font_w > 0 && font_h > 0;
@@ -191,6 +216,7 @@ fn render_fullhd_viewport(frame: &mut Frame, area: Rect, app: &App, interactions
         &app.mesh_cache,
         app.show_ligands,
         interactions,
+        selection,
     );
 
     // If the terminal supports a real graphics protocol, hand it the pixels.
@@ -293,7 +319,17 @@ mod tests {
     }
 
     fn draw_protein(protein: Protein, mode: RenderMode, cols: u16, rows: u16) -> Buffer {
-        let app = App::new(
+        draw_with(protein, mode, cols, rows, |_| {})
+    }
+
+    fn draw_with(
+        protein: Protein,
+        mode: RenderMode,
+        cols: u16,
+        rows: u16,
+        setup: impl FnOnce(&mut App),
+    ) -> Buffer {
+        let mut app = App::new(
             protein,
             AppConfig {
                 render_mode: mode,
@@ -306,6 +342,7 @@ mod tests {
             rows,
             Picker::halfblocks(),
         );
+        setup(&mut app);
         // The main layout reserves 4 rows of chrome around the viewport.
         let area = Rect::new(0, 0, cols, rows - 4);
         let mut term = Terminal::new(TestBackend::new(cols, rows)).unwrap();
@@ -348,6 +385,25 @@ mod tests {
                 hdplus.0.abs_diff(other.0) <= 2 && hdplus.1.abs_diff(other.1) <= 2,
                 "HDplus extent {hdplus:?} should match {label} {other:?} within 2 cells"
             );
+        }
+    }
+
+    #[test]
+    fn a_selection_changes_the_view_in_every_render_mode() {
+        // The overlay has to be threaded through four separate render paths;
+        // this is what catches one of them being forgotten.
+        let (cols, rows) = (100u16, 40u16);
+        for mode in [
+            RenderMode::Braille,
+            RenderMode::HalfBlock,
+            RenderMode::HalfBlockPlus,
+            RenderMode::FullHD,
+        ] {
+            let plain = draw_protein(fixture(), mode, cols, rows);
+            let picked = draw_with(fixture(), mode, cols, rows, |app| {
+                app.selection.set_range(0, 4, 9, true);
+            });
+            assert_ne!(plain, picked, "{mode:?} ignored the selection overlay");
         }
     }
 

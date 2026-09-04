@@ -1,10 +1,12 @@
 use crate::app::VizMode;
 use crate::model::interface::{Interaction, InteractionType};
-use crate::model::protein::{LigandType, MoleculeType, Protein};
+use crate::model::protein::{Atom, LigandType, MoleculeType, Protein, Residue};
+use crate::model::residue_selection::SelectionView;
 use crate::render::bond::atoms_bonded;
 use crate::render::camera::Camera;
 use crate::render::color::{ColorScheme, color_to_rgb};
 use crate::render::framebuffer::{Framebuffer, default_light_dir};
+use crate::render::palette::palette;
 use crate::render::ribbon::RibbonTriangle;
 use rayon::prelude::*;
 
@@ -24,6 +26,7 @@ pub fn render_hd_framebuffer(
     mesh: &[RibbonTriangle],
     show_ligands: bool,
     interactions: &[Interaction],
+    selection: Option<SelectionView<'_>>,
 ) -> Framebuffer {
     render_hd_framebuffer_ssaa(
         protein,
@@ -35,6 +38,7 @@ pub fn render_hd_framebuffer(
         mesh,
         show_ligands,
         interactions,
+        selection,
         1.0,
     )
 }
@@ -58,6 +62,7 @@ pub fn render_hd_framebuffer_ssaa(
     mesh: &[RibbonTriangle],
     show_ligands: bool,
     interactions: &[Interaction],
+    selection: Option<SelectionView<'_>>,
     ssaa: f64,
 ) -> Framebuffer {
     let px_w = width as usize;
@@ -114,6 +119,13 @@ pub fn render_hd_framebuffer_ssaa(
     // Render small molecules as ball-and-stick overlay
     if show_ligands {
         render_ligands_fb(&mut fb, protein, camera, color_scheme, half_w, half_h, ts);
+    }
+
+    // Residues picked in the sequence panel, drawn over whatever mode is
+    // active but still z-buffered against it, so a picked side chain is hidden
+    // when the structure genuinely occludes it.
+    if let Some(view) = selection.filter(|view| !view.selection.is_empty()) {
+        render_selection_fb(&mut fb, protein, view, camera, half_w, half_h, ts);
     }
 
     // Post-pass: blend all rasterized pixels toward a cool blue-gray fog color
@@ -710,6 +722,138 @@ fn render_ligands_fb(
     }
 }
 
+/// Draw the residues picked in the sequence panel.
+///
+/// With ball-and-stick on, every atom of a picked residue becomes a sphere and
+/// every bond a stick, including the peptide or phosphodiester bond into the
+/// next picked residue so a selected stretch reads as one connected fragment.
+/// With it off, a single marker sphere per residue says where the selection is
+/// without hiding the cartoon underneath.
+fn render_selection_fb(
+    fb: &mut Framebuffer,
+    protein: &Protein,
+    view: SelectionView<'_>,
+    camera: &Camera,
+    half_w: f64,
+    half_h: f64,
+    ts: f64,
+) {
+    let marker = palette().selection.marker.0;
+    let carbon = palette().selection.carbon.0;
+
+    for (chain_index, chain) in protein.chains.iter().enumerate() {
+        for (residue_index, residue) in chain.residues.iter().enumerate() {
+            if !view.selection.contains(chain_index, residue_index) {
+                continue;
+            }
+
+            if !view.ball_and_stick {
+                // One sphere on the backbone atom (CA / C4'), or on the first
+                // atom of a residue that has no backbone atom at all.
+                if let Some(atom) = residue
+                    .atoms
+                    .iter()
+                    .find(|atom| atom.is_backbone)
+                    .or_else(|| residue.atoms.first())
+                {
+                    let projected = camera.project(atom.x, atom.y, atom.z);
+                    let px = to_pixel(projected.x, projected.y, projected.z, half_w, half_h);
+                    // The backbone atom sits *inside* the ribbon, so an
+                    // unbiased marker would be hidden by the very residue it
+                    // marks.  Pulling it forward by a ribbon half-width makes
+                    // it visible while anything genuinely in front still wins.
+                    fb.draw_circle_z(px[0], px[1], px[2] - MARKER_DEPTH_BIAS, 4.0 * ts, marker);
+                }
+                continue;
+            }
+
+            let atoms: Vec<([f64; 3], [u8; 3], &Atom)> = residue
+                .atoms
+                .iter()
+                .map(|atom| {
+                    let projected = camera.project(atom.x, atom.y, atom.z);
+                    let px = to_pixel(projected.x, projected.y, projected.z, half_w, half_h);
+                    (px, selection_atom_color(atom, carbon), atom)
+                })
+                .collect();
+
+            for (px, color, atom) in &atoms {
+                fb.draw_circle_z(px[0], px[1], px[2], atom_radius(atom) * ts, *color);
+            }
+
+            for i in 0..atoms.len() {
+                for j in (i + 1)..atoms.len() {
+                    let (p1, c1, a1) = &atoms[i];
+                    let (p2, _, a2) = &atoms[j];
+                    if atoms_bonded(&a1.element, a1.x, a1.y, a1.z, &a2.element, a2.x, a2.y, a2.z) {
+                        fb.draw_thick_line_3d(*p1, *p2, *c1, 2.0 * ts);
+                    }
+                }
+            }
+
+            // Link to the next residue when it is picked too.
+            let next_index = residue_index + 1;
+            if !view.selection.contains(chain_index, next_index) {
+                continue;
+            }
+            let Some(next) = chain.residues.get(next_index) else {
+                continue;
+            };
+            if let Some((from, to)) = linking_atoms(chain.molecule_type, residue, next) {
+                let p1 = camera.project(from.x, from.y, from.z);
+                let p2 = camera.project(to.x, to.y, to.z);
+                fb.draw_thick_line_3d(
+                    to_pixel(p1.x, p1.y, p1.z, half_w, half_h),
+                    to_pixel(p2.x, p2.y, p2.z, half_w, half_h),
+                    selection_atom_color(from, carbon),
+                    2.0 * ts,
+                );
+            }
+        }
+    }
+}
+
+/// CPK color, except that carbon takes the selection color: the standard way
+/// to make one fragment of a structure legible without recoloring chemistry.
+pub(crate) fn selection_atom_color(atom: &Atom, carbon: [u8; 3]) -> [u8; 3] {
+    if atom.element.trim().eq_ignore_ascii_case("C") {
+        carbon
+    } else {
+        color_to_rgb(ColorScheme::element_color(atom))
+    }
+}
+
+/// Sphere radius in framebuffer units before thickness scaling.
+pub(crate) fn atom_radius(atom: &Atom) -> f64 {
+    match atom.element.trim() {
+        "H" => 1.4,
+        "C" => 2.6,
+        "N" | "O" => 2.8,
+        "S" | "P" => 3.2,
+        _ => 3.0,
+    }
+}
+
+/// How far forward, in angstroms, a selection marker is pushed so it clears
+/// the ribbon drawn around its own backbone atom.
+const MARKER_DEPTH_BIAS: f64 = 3.5;
+
+/// The covalent bond joining consecutive polymer residues.
+pub(crate) fn linking_atoms<'a>(
+    molecule_type: MoleculeType,
+    current: &'a Residue,
+    next: &'a Residue,
+) -> Option<(&'a Atom, &'a Atom)> {
+    let (from, to) = match molecule_type {
+        MoleculeType::RNA | MoleculeType::DNA => ("O3'", "P"),
+        MoleculeType::Protein => ("C", "N"),
+        MoleculeType::SmallMolecule => return None,
+    };
+    let a = current.atoms.iter().find(|atom| atom.name.trim() == from)?;
+    let b = next.atoms.iter().find(|atom| atom.name.trim() == to)?;
+    Some((a, b))
+}
+
 /// Render non-covalent interaction lines as dashed segments in the framebuffer.
 fn render_interactions_fb(
     fb: &mut Framebuffer,
@@ -831,6 +975,7 @@ mod tests {
             &[],
             false,
             &[],
+            None,
             ssaa,
         )
     }
@@ -885,6 +1030,7 @@ mod tests {
                 &[],
                 false,
                 &[],
+                None,
                 ssaa,
             )
         };
@@ -895,5 +1041,150 @@ mod tests {
                 "ssaa {bad} should fall back to 1.0"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use crate::model::protein::{Chain, Residue, SecondaryStructure};
+    use crate::model::residue_selection::ResidueSelection;
+    use crate::render::color::ColorSchemeType;
+
+    /// Six residues with a two-atom side chain each, spread across the view.
+    fn side_chain_protein() -> Protein {
+        let atom = |name: &str, element: &str, x: f64, y: f64, backbone: bool| Atom {
+            name: name.to_string(),
+            element: element.to_string(),
+            x,
+            y,
+            z: 0.0,
+            b_factor: 20.0,
+            is_backbone: backbone,
+            is_hetero: false,
+        };
+        let residues = (0..6)
+            .map(|i| {
+                let x = i as f64 * 6.0 - 15.0;
+                Residue {
+                    name: "LEU".to_string(),
+                    seq_num: i + 1,
+                    insertion_code: None,
+                    atoms: vec![
+                        atom("CA", "C", x, 0.0, true),
+                        atom("CB", "C", x + 1.5, 1.5, false),
+                        atom("CG", "O", x + 2.6, 3.0, false),
+                    ],
+                    secondary_structure: SecondaryStructure::Coil,
+                }
+            })
+            .collect();
+        Protein {
+            name: "sidechains".to_string(),
+            chains: vec![Chain {
+                id: "A".to_string(),
+                residues,
+                molecule_type: MoleculeType::Protein,
+            }],
+            ligands: Vec::new(),
+        }
+    }
+
+    fn lit_pixels(fb: &Framebuffer) -> usize {
+        fb.color.iter().filter(|color| **color != [0, 0, 0]).count()
+    }
+
+    fn render(protein: &Protein, view: Option<SelectionView<'_>>) -> Framebuffer {
+        let mut camera = Camera::default();
+        camera.zoom = 8.0;
+        let scheme = ColorScheme::new(ColorSchemeType::Structure, protein.residue_count());
+        render_hd_framebuffer(
+            protein,
+            &camera,
+            &scheme,
+            VizMode::Backbone,
+            400.0,
+            300.0,
+            &[],
+            false,
+            &[],
+            view,
+        )
+    }
+
+    #[test]
+    fn selection_adds_ink_and_ball_and_stick_adds_more_than_markers() {
+        let protein = side_chain_protein();
+        let mut selection = ResidueSelection::new(&protein);
+        selection.set_range(0, 0, 2, true);
+
+        let plain = lit_pixels(&render(&protein, None));
+        let marked = lit_pixels(&render(
+            &protein,
+            Some(SelectionView {
+                selection: &selection,
+                ball_and_stick: false,
+            }),
+        ));
+        let ball_and_stick = lit_pixels(&render(
+            &protein,
+            Some(SelectionView {
+                selection: &selection,
+                ball_and_stick: true,
+            }),
+        ));
+
+        assert!(
+            plain < marked,
+            "markers should add ink: {plain} -> {marked}"
+        );
+        assert!(
+            marked < ball_and_stick,
+            "side chains should add more than markers: {marked} -> {ball_and_stick}"
+        );
+    }
+
+    #[test]
+    fn an_empty_selection_renders_identically_to_no_selection() {
+        // The overlay must be free when nothing is picked -- this is what lets
+        // the panel stay open with no selection and cost nothing.
+        let protein = side_chain_protein();
+        let empty = ResidueSelection::new(&protein);
+        let plain = render(&protein, None);
+        let with_empty = render(
+            &protein,
+            Some(SelectionView {
+                selection: &empty,
+                ball_and_stick: true,
+            }),
+        );
+        assert_eq!(plain.color, with_empty.color);
+    }
+
+    #[test]
+    fn only_picked_residues_gain_side_chains() {
+        // The projection mirrors x, so residue 0 lands right of centre; the
+        // far half of the frame must be untouched by picking it.
+        let protein = side_chain_protein();
+        let mut selection = ResidueSelection::new(&protein);
+        selection.set(0, 0, true);
+
+        let left_half = |fb: &Framebuffer| {
+            (0..fb.height)
+                .flat_map(|y| (0..fb.width / 2).map(move |x| y * fb.width + x))
+                .filter(|i| fb.color[*i] != [0, 0, 0])
+                .count()
+        };
+
+        let plain = render(&protein, None);
+        let picked = render(
+            &protein,
+            Some(SelectionView {
+                selection: &selection,
+                ball_and_stick: true,
+            }),
+        );
+        assert_eq!(left_half(&plain), left_half(&picked));
+        assert!(lit_pixels(&plain) < lit_pixels(&picked));
     }
 }

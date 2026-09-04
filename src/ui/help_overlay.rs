@@ -11,7 +11,7 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
         return;
     }
     let popup_width = 60u16.min(area.width.saturating_sub(4));
-    let popup_height = 23u16.min(area.height.saturating_sub(4));
+    let popup_height = 36u16.min(area.height.saturating_sub(4));
     let x = (area.width - popup_width) / 2;
     let y = (area.height - popup_height) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -93,6 +93,56 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from(vec![
             Span::styled("  q          ", Style::default().fg(Color::Yellow)),
             Span::raw("Quit"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Sequence panel",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled("  S          ", Style::default().fg(Color::Yellow)),
+            Span::raw("Open / close the sequence panel"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  \u{2190}\u{2192}\u{2191}\u{2193}       ",
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::raw("Move the residue cursor"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Shift+arrow", Style::default().fg(Color::Yellow)),
+            Span::raw(" Extend the selection"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Enter      ", Style::default().fg(Color::Yellow)),
+            Span::raw("Select / deselect residue"),
+        ]),
+        Line::from(vec![
+            Span::styled("  A          ", Style::default().fg(Color::Yellow)),
+            Span::raw("Select / deselect whole chain"),
+        ]),
+        Line::from(vec![
+            Span::styled("  x          ", Style::default().fg(Color::Yellow)),
+            Span::raw("Clear the selection"),
+        ]),
+        Line::from(vec![
+            Span::styled("  b          ", Style::default().fg(Color::Yellow)),
+            Span::raw("Ball-and-stick for the selection"),
+        ]),
+        Line::from(vec![
+            Span::styled("  z          ", Style::default().fg(Color::Yellow)),
+            Span::raw("Centre the view on the selection"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Home / End ", Style::default().fg(Color::Yellow)),
+            Span::raw("Start / end of chain"),
+        ]),
+        Line::from(vec![
+            Span::styled("  < / >      ", Style::default().fg(Color::Yellow)),
+            Span::raw("Shrink / grow the panel"),
         ]),
         Line::from(""),
         Line::from(Span::styled(

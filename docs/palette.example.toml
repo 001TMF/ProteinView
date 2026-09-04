@@ -95,3 +95,12 @@ ligand          = "FFFFFF"  # ligands, kept bright so they stay visible
 ligand  = "FF00FF"
 ion     = "00FFFF"
 rainbow = "FF00FF"  # ligands under the Rainbow scheme
+
+# --- Sequence panel selection ('S') ------------------------------------------
+# Residues picked in the sequence panel.  Carbons of the ball-and-stick overlay
+# take `carbon`; every other element keeps its CPK color, so a picked residue
+# still reads as itself.
+[selection]
+carbon = "00E68C"  # ball-and-stick carbons of picked residues
+marker = "00E68C"  # marker sphere shown when ball-and-stick is off ('b')
+cursor = "FFC800"  # the sequence panel's cursor cell

@@ -3,8 +3,10 @@ use std::sync::mpsc;
 use ratatui_image::picker::Picker;
 
 use crate::model::interface::{InterfaceAnalysis, analyze_binding_pockets, analyze_interface};
-use crate::model::protein::Protein;
+use crate::model::protein::{Protein, Residue};
+use crate::model::residue_selection::ResidueSelection;
 use crate::model::selection::ResidueColorOverrides;
+use crate::model::sequence::{SeqRow, SequenceLayout, wrap_for_width};
 use crate::render::camera::Camera;
 use crate::render::color::{ColorScheme, ColorSchemeType};
 use crate::render::ribbon::{RibbonTriangle, generate_ribbon_mesh};
@@ -223,6 +225,29 @@ pub struct App {
     /// Next shared-memory slot to hand the terminal.  A `Cell` because the
     /// viewport renders from `&App` but each frame needs its own object.
     shm_slot: std::cell::Cell<u32>,
+    /// Whether the scrollable chain-sequence panel is open.
+    pub show_sequence: bool,
+    /// Residues picked in the sequence panel.
+    pub selection: ResidueSelection,
+    /// Whether the selection is drawn as ball-and-stick in the 3D view.
+    /// When off, selected residues are still marked with a highlight sphere.
+    pub show_ball_stick: bool,
+    /// Cursor position in the sequence panel, as `(chain, residue)` indices.
+    pub seq_cursor: (usize, usize),
+    /// Anchor for shift-extended range selection, cleared by any unshifted move.
+    seq_anchor: Option<(usize, usize)>,
+    /// First layout row drawn in the panel.
+    pub seq_scroll: usize,
+    /// Wrapped row layout, rebuilt whenever the panel width changes.
+    seq_layout: SequenceLayout,
+    /// Sequence rows the panel can currently show, set from the drawn area.
+    seq_visible_rows: usize,
+    /// Panel height in terminal rows, adjustable with `<` and `>`.
+    pub seq_panel_height: u16,
+    /// A chain to scroll to once the layout for the current width exists.
+    /// Opening the panel happens before the frame that sizes it, so the jump
+    /// has to wait for a layout to jump within.
+    seq_pending_goto: Option<usize>,
 }
 
 impl App {
@@ -339,6 +364,15 @@ impl App {
 
         let connection_type = ConnectionType::detect();
 
+        let selection = ResidueSelection::new(&protein);
+        // The first chain with residues is where the sequence cursor starts;
+        // a structure can open with an empty leading chain.
+        let cursor_chain = protein
+            .chains
+            .iter()
+            .position(|chain| !chain.residues.is_empty())
+            .unwrap_or(0);
+
         Self {
             protein,
             camera,
@@ -367,6 +401,16 @@ impl App {
             last_camera_change: None,
             kitty_shm: false,
             shm_slot: std::cell::Cell::new(0),
+            show_sequence: false,
+            selection,
+            show_ball_stick: true,
+            seq_cursor: (cursor_chain, 0),
+            seq_anchor: None,
+            seq_scroll: 0,
+            seq_layout: SequenceLayout::default(),
+            seq_visible_rows: 1,
+            seq_panel_height: DEFAULT_SEQUENCE_PANEL_HEIGHT,
+            seq_pending_goto: None,
         }
     }
 
@@ -517,6 +561,9 @@ impl App {
             if self.show_interface {
                 self.rebuild_interface_colors();
             }
+            if self.show_sequence {
+                self.seq_goto_chain(self.current_chain);
+            }
         }
     }
 
@@ -529,6 +576,9 @@ impl App {
             };
             if self.show_interface {
                 self.rebuild_interface_colors();
+            }
+            if self.show_sequence {
+                self.seq_goto_chain(self.current_chain);
             }
         }
     }
@@ -649,6 +699,470 @@ impl App {
         }
 
         self.recalculate_zoom(term_cols, term_rows);
+    }
+}
+
+/// Panel rows that are not sequence: the top border and the cursor line.
+pub const SEQUENCE_PANEL_CHROME: u16 = 2;
+
+/// Default height of the sequence panel, in terminal rows.
+pub const DEFAULT_SEQUENCE_PANEL_HEIGHT: u16 = 10;
+
+/// Bounds for `<` / `>` resizing.  The panel is additionally capped at half the
+/// terminal height by the layout, so the 3D view never disappears.
+pub const MIN_SEQUENCE_PANEL_HEIGHT: u16 = 4;
+pub const MAX_SEQUENCE_PANEL_HEIGHT: u16 = 30;
+
+/// Sequence panel: layout, cursor navigation and residue selection.
+impl App {
+    /// Open or close the panel.  The selection outlives it, so closing the
+    /// panel keeps whatever is drawn in 3D.
+    pub fn toggle_sequence_panel(&mut self) {
+        self.show_sequence = !self.show_sequence;
+        if self.show_sequence {
+            // Follow the chain the rest of the UI is focused on, once there is
+            // a layout to scroll within.
+            self.seq_pending_goto = Some(self.current_chain);
+        }
+    }
+
+    /// Tell the panel how much room it has, rebuilding the wrapped layout when
+    /// the width changes.  Called once per frame before input is handled, so
+    /// navigation and rendering always share one layout.
+    pub fn set_sequence_viewport(&mut self, width: u16, height: u16) {
+        let avail = width.saturating_sub(crate::ui::sequence_panel::GUTTER) as usize;
+        let wrap = wrap_for_width(avail);
+        if self.seq_layout.width != width || self.seq_layout.wrap != wrap {
+            self.seq_layout = SequenceLayout::build(&self.protein, wrap, width);
+        }
+        self.seq_visible_rows = height.saturating_sub(SEQUENCE_PANEL_CHROME).max(1) as usize;
+        if let Some(chain) = self.seq_pending_goto.take() {
+            self.seq_goto_chain(chain);
+        }
+        self.scroll_cursor_into_view();
+    }
+
+    pub fn sequence_layout(&self) -> &SequenceLayout {
+        &self.seq_layout
+    }
+
+    /// Grow or shrink the panel by `delta` rows, within the fixed bounds.
+    pub fn resize_sequence_panel(&mut self, delta: i16) {
+        let height = i32::from(self.seq_panel_height) + i32::from(delta);
+        self.seq_panel_height = height.clamp(
+            i32::from(MIN_SEQUENCE_PANEL_HEIGHT),
+            i32::from(MAX_SEQUENCE_PANEL_HEIGHT),
+        ) as u16;
+    }
+
+    /// The residue under the cursor, if the structure has one.
+    pub fn seq_cursor_residue(&self) -> Option<(&crate::model::protein::Chain, &Residue)> {
+        let chain = self.protein.chains.get(self.seq_cursor.0)?;
+        let residue = chain.residues.get(self.seq_cursor.1)?;
+        Some((chain, residue))
+    }
+
+    fn seq_chain_len(&self, chain: usize) -> usize {
+        self.protein
+            .chains
+            .get(chain)
+            .map_or(0, |chain| chain.residues.len())
+    }
+
+    /// Move the cursor to an exact residue, extending the selection when
+    /// `extend` is set.
+    ///
+    /// Extension is anchored at the cursor position the first shifted move
+    /// started from and only ever adds residues, so a shift-arrow can never
+    /// silently drop part of an existing selection.
+    fn seq_move_to(&mut self, chain: usize, residue: usize, extend: bool) {
+        if self.seq_chain_len(chain) == 0 {
+            return;
+        }
+        let previous = self.seq_cursor;
+        let residue = residue.min(self.seq_chain_len(chain) - 1);
+        self.seq_cursor = (chain, residue);
+        self.current_chain = chain;
+        // Interface coloring is keyed on the focus chain, so moving the cursor
+        // into another chain has to refresh it exactly as `[` / `]` does.
+        if previous.0 != chain && self.show_interface {
+            self.rebuild_interface_colors();
+        }
+
+        if extend {
+            let anchor = *self.seq_anchor.get_or_insert(previous);
+            if anchor.0 == chain {
+                self.selection.set_range(chain, anchor.1, residue, true);
+            } else {
+                // A range that crosses chains is not a range; restart the
+                // anchor in the new chain rather than selecting everything in
+                // between.
+                self.selection.set(chain, residue, true);
+                self.seq_anchor = Some((chain, residue));
+            }
+        } else {
+            self.seq_anchor = None;
+        }
+
+        self.scroll_cursor_into_view();
+    }
+
+    /// Flat index of a residue across all chains, used for horizontal movement
+    /// that runs off the end of a chain into the next one.
+    fn seq_flat_index(&self, chain: usize, residue: usize) -> usize {
+        self.protein.chains[..chain.min(self.protein.chains.len())]
+            .iter()
+            .map(|chain| chain.residues.len())
+            .sum::<usize>()
+            + residue
+    }
+
+    fn seq_from_flat(&self, mut index: usize) -> Option<(usize, usize)> {
+        for (chain_index, chain) in self.protein.chains.iter().enumerate() {
+            if index < chain.residues.len() {
+                return Some((chain_index, index));
+            }
+            index -= chain.residues.len();
+        }
+        None
+    }
+
+    /// Move by `delta` residues, crossing chain boundaries at the ends.
+    pub fn seq_move_horizontal(&mut self, delta: isize, extend: bool) {
+        let total: usize = self
+            .protein
+            .chains
+            .iter()
+            .map(|chain| chain.residues.len())
+            .sum();
+        if total == 0 {
+            return;
+        }
+        let flat = self.seq_flat_index(self.seq_cursor.0, self.seq_cursor.1) as isize;
+        let target = (flat + delta).clamp(0, total as isize - 1) as usize;
+        if let Some((chain, residue)) = self.seq_from_flat(target) {
+            self.seq_move_to(chain, residue, extend);
+        }
+    }
+
+    /// Move `delta` layout rows, keeping the column and skipping chain headers.
+    pub fn seq_move_vertical(&mut self, delta: isize, extend: bool) {
+        let Some((row, column)) = self.seq_layout.locate(self.seq_cursor.0, self.seq_cursor.1)
+        else {
+            return;
+        };
+        let rows = self.seq_layout.row_count() as isize;
+        if rows == 0 {
+            return;
+        }
+        let target = (row as isize + delta).clamp(0, rows - 1);
+        let step = if delta >= 0 { 1 } else { -1 };
+
+        // Headers carry no residue, so walk past them — first onwards in the
+        // direction of travel, then backwards if that ran off the end.
+        let landing = seek_residue_row(&self.seq_layout, target, step, rows)
+            .or_else(|| seek_residue_row(&self.seq_layout, target, -step, rows));
+        let Some(landing) = landing else {
+            return;
+        };
+        if let Some((chain, residue)) = self.seq_layout.residue_at(landing, column) {
+            self.seq_move_to(chain, residue, extend);
+        }
+    }
+
+    /// Jump to the first or last residue of the cursor's chain.
+    pub fn seq_move_to_chain_edge(&mut self, end: bool, extend: bool) {
+        let chain = self.seq_cursor.0;
+        let len = self.seq_chain_len(chain);
+        if len == 0 {
+            return;
+        }
+        self.seq_move_to(chain, if end { len - 1 } else { 0 }, extend);
+    }
+
+    /// Move by one screenful.
+    pub fn seq_page(&mut self, forward: bool, extend: bool) {
+        let rows = self.seq_visible_rows.max(1) as isize;
+        self.seq_move_vertical(if forward { rows } else { -rows }, extend);
+    }
+
+    /// Put the cursor on the first residue of `chain` and show its header.
+    pub fn seq_goto_chain(&mut self, chain: usize) {
+        if self.protein.chains.is_empty() {
+            return;
+        }
+        let chain = chain.min(self.protein.chains.len() - 1);
+        if self.seq_chain_len(chain) == 0 {
+            // Nothing to put a cursor on; still scroll the header into view.
+            if let Some(header) = self.seq_layout.header_row(chain) {
+                self.seq_scroll = self.clamp_scroll(header);
+            }
+            self.current_chain = chain;
+            return;
+        }
+        self.seq_move_to(chain, 0, false);
+        if let Some(header) = self.seq_layout.header_row(chain) {
+            self.seq_scroll = self.clamp_scroll(header);
+        }
+    }
+
+    /// Toggle the residue under the cursor.
+    pub fn seq_toggle_selection(&mut self) {
+        let (chain, residue) = self.seq_cursor;
+        if self.seq_chain_len(chain) == 0 {
+            return;
+        }
+        self.selection.toggle(chain, residue);
+        // A later shift-arrow extends from here.
+        self.seq_anchor = Some((chain, residue));
+    }
+
+    /// Select the cursor's whole chain, or clear it if it is already fully in.
+    pub fn seq_toggle_chain_selection(&mut self) {
+        let chain = self.seq_cursor.0;
+        let len = self.seq_chain_len(chain);
+        if len == 0 {
+            return;
+        }
+        let fully_selected = (0..len).all(|residue| self.selection.contains(chain, residue));
+        self.selection.set_chain(chain, !fully_selected);
+        self.seq_anchor = None;
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
+        self.seq_anchor = None;
+    }
+
+    pub fn toggle_ball_stick(&mut self) {
+        self.show_ball_stick = !self.show_ball_stick;
+    }
+
+    /// Centre the view on the selection, or on the cursor residue when nothing
+    /// is selected.  Zoom is left alone: finding the residue is the hard part,
+    /// and the user still owns the magnification.
+    pub fn focus_on_selection(&mut self) -> bool {
+        let target = self.selection.centroid(&self.protein).or_else(|| {
+            let (_, residue) = self.seq_cursor_residue()?;
+            let atoms = &residue.atoms;
+            if atoms.is_empty() {
+                return None;
+            }
+            let n = atoms.len() as f64;
+            Some([
+                atoms.iter().map(|a| a.x).sum::<f64>() / n,
+                atoms.iter().map(|a| a.y).sum::<f64>() / n,
+                atoms.iter().map(|a| a.z).sum::<f64>() / n,
+            ])
+        });
+        let Some([x, y, z]) = target else {
+            return false;
+        };
+        // `project` already includes the current pan, so subtracting the
+        // projected offset lands the target exactly on the view centre for any
+        // rotation or zoom.
+        let projected = self.camera.project(x, y, z);
+        self.camera.pan_x -= projected.x;
+        self.camera.pan_y -= projected.y;
+        self.note_camera_change();
+        true
+    }
+
+    fn clamp_scroll(&self, scroll: usize) -> usize {
+        let max = self
+            .seq_layout
+            .row_count()
+            .saturating_sub(self.seq_visible_rows.max(1));
+        scroll.min(max)
+    }
+
+    fn scroll_cursor_into_view(&mut self) {
+        let Some((row, _)) = self.seq_layout.locate(self.seq_cursor.0, self.seq_cursor.1) else {
+            return;
+        };
+        let visible = self.seq_visible_rows.max(1);
+        if row < self.seq_scroll {
+            self.seq_scroll = row;
+        } else if row >= self.seq_scroll + visible {
+            self.seq_scroll = row + 1 - visible;
+        }
+        self.seq_scroll = self.clamp_scroll(self.seq_scroll);
+    }
+}
+
+/// First residue row at or after `from`, walking in `step` direction.
+fn seek_residue_row(
+    layout: &SequenceLayout,
+    from: isize,
+    step: isize,
+    rows: isize,
+) -> Option<usize> {
+    let mut row = from;
+    while (0..rows).contains(&row) {
+        if !matches!(layout.rows[row as usize], SeqRow::Header(_)) {
+            return Some(row as usize);
+        }
+        row += step;
+    }
+    None
+}
+
+#[cfg(test)]
+mod sequence_navigation_tests {
+    use super::*;
+    use crate::model::protein::{Atom, Chain, MoleculeType, SecondaryStructure};
+    use crate::model::selection::ResidueColorOverrides;
+    use ratatui_image::picker::Picker;
+
+    fn chain(id: &str, count: usize) -> Chain {
+        Chain {
+            id: id.to_string(),
+            molecule_type: MoleculeType::Protein,
+            residues: (0..count)
+                .map(|i| Residue {
+                    name: "ALA".to_string(),
+                    seq_num: i as i32 + 1,
+                    insertion_code: None,
+                    atoms: vec![Atom {
+                        name: "CA".to_string(),
+                        element: "C".to_string(),
+                        x: i as f64,
+                        y: 0.0,
+                        z: 0.0,
+                        b_factor: 10.0,
+                        is_backbone: true,
+                        is_hetero: false,
+                    }],
+                    secondary_structure: SecondaryStructure::Coil,
+                })
+                .collect(),
+        }
+    }
+
+    /// Chains of 25, 0 and 8 residues: the empty one in the middle is what
+    /// makes navigation interesting.
+    fn app() -> App {
+        let protein = Protein {
+            name: "nav".to_string(),
+            chains: vec![chain("A", 25), chain("B", 0), chain("C", 8)],
+            ligands: Vec::new(),
+        };
+        let mut app = App::new(
+            protein,
+            AppConfig {
+                render_mode: RenderMode::Braille,
+                viz_mode: VizMode::Backbone,
+                user_explicit_mode: true,
+                color_override: None,
+                residue_colors: ResidueColorOverrides::default(),
+            },
+            80,
+            40,
+            Picker::halfblocks(),
+        );
+        app.show_sequence = true;
+        // Gutter plus three groups of ten: ten residues per row.
+        app.set_sequence_viewport(7 + 10, 8);
+        app
+    }
+
+    #[test]
+    fn horizontal_movement_crosses_into_the_next_non_empty_chain() {
+        let mut app = app();
+        app.seq_move_to_chain_edge(true, false);
+        assert_eq!(app.seq_cursor, (0, 24));
+        // Past the end of chain A, straight over the empty chain B.
+        app.seq_move_horizontal(1, false);
+        assert_eq!(app.seq_cursor, (2, 0));
+        assert_eq!(app.current_chain, 2);
+        // And back again.
+        app.seq_move_horizontal(-1, false);
+        assert_eq!(app.seq_cursor, (0, 24));
+    }
+
+    #[test]
+    fn vertical_movement_skips_chain_headers() {
+        let mut app = app();
+        app.seq_move_to(0, 22, false);
+        // Row below the last row of chain A is chain C's header; the cursor
+        // must land on residues, not on it.
+        app.seq_move_vertical(1, false);
+        assert_eq!(app.seq_cursor.0, 2, "expected to land in chain C");
+        app.seq_move_vertical(-1, false);
+        assert_eq!(app.seq_cursor.0, 0, "expected to land back in chain A");
+    }
+
+    #[test]
+    fn shift_extension_selects_a_range_and_restarts_across_chains() {
+        let mut app = app();
+        app.seq_move_to(0, 4, false);
+        app.seq_toggle_selection();
+        app.seq_move_horizontal(3, true);
+        assert_eq!(app.selection.count(), 4);
+        assert!(app.selection.contains(0, 7));
+
+        // Extending into another chain must not select everything between.
+        app.seq_move_to(2, 3, true);
+        assert_eq!(app.selection.count(), 5);
+        assert!(app.selection.contains(2, 3));
+        assert!(!app.selection.contains(2, 0));
+    }
+
+    #[test]
+    fn the_cursor_stays_inside_the_visible_rows() {
+        let mut app = app();
+        let visible = app.seq_visible_rows;
+        app.seq_move_to_chain_edge(true, false);
+        let (row, _) = app
+            .sequence_layout()
+            .locate(app.seq_cursor.0, app.seq_cursor.1)
+            .unwrap();
+        assert!(
+            (app.seq_scroll..app.seq_scroll + visible).contains(&row),
+            "row {row} outside scroll window {}..{}",
+            app.seq_scroll,
+            app.seq_scroll + visible
+        );
+    }
+
+    #[test]
+    fn empty_chains_never_take_the_cursor() {
+        let mut app = app();
+        app.seq_goto_chain(1);
+        assert_eq!(app.current_chain, 1, "the header still gets focus");
+        assert_ne!(app.seq_cursor.0, 1, "but no residue cursor lands there");
+    }
+
+    #[test]
+    fn focusing_the_selection_centres_it() {
+        let mut app = app();
+        app.selection.set_range(0, 0, 4, true);
+        assert!(app.focus_on_selection());
+        let centroid = app.selection.centroid(&app.protein).unwrap();
+        let projected = app.camera.project(centroid[0], centroid[1], centroid[2]);
+        assert!(
+            projected.x.abs() < 1e-9 && projected.y.abs() < 1e-9,
+            "selection should project to the view centre, got {projected:?}"
+        );
+    }
+
+    #[test]
+    fn the_panel_never_squeezes_out_the_viewport() {
+        let mut app = app();
+        for _ in 0..100 {
+            app.resize_sequence_panel(1);
+        }
+        assert_eq!(app.seq_panel_height, MAX_SEQUENCE_PANEL_HEIGHT);
+        // On a 20-row terminal the layout still leaves the rest of the UI room.
+        assert_eq!(
+            crate::ui::sequence_panel::height_for(&app, 20),
+            13,
+            "panel should give back the seven rows the rest of the UI needs"
+        );
+        for _ in 0..100 {
+            app.resize_sequence_panel(-1);
+        }
+        assert_eq!(app.seq_panel_height, MIN_SEQUENCE_PANEL_HEIGHT);
     }
 }
 

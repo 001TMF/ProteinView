@@ -160,6 +160,7 @@ impl PanelSession {
             &self.mesh_cache,
             self.settings.show_ligands,
             interactions,
+            None,
         );
         let image = DynamicImage::ImageRgba8(framebuffer.to_rgba_image());
         write_png_atomically(&image, &self.output_path)?;

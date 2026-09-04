@@ -120,6 +120,7 @@ pub fn save_png(mut protein: Protein, output_path: &Path, options: SnapshotOptio
         &mesh,
         options.show_ligands,
         interactions,
+        None,
     );
     let image = DynamicImage::ImageRgba8(framebuffer.to_rgba_image());
     write_png_atomically(&image, output_path)

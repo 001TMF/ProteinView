@@ -129,6 +129,53 @@ struct Cli {
     threads: Option<usize>,
 }
 
+/// Rebuild the sequence panel's wrapped layout for the current terminal size.
+///
+/// Cheap unless the width actually changed, so it is called both before and
+/// after input handling.
+fn sync_sequence_viewport(app: &mut App, fallback: (u16, u16)) {
+    if !app.show_sequence {
+        return;
+    }
+    let (cols, rows) = crossterm::terminal::size().unwrap_or(fallback);
+    let panel_width = if app.show_interface {
+        cols.saturating_sub(ui::interface_panel::SIDEBAR_WIDTH)
+    } else {
+        cols
+    };
+    let panel_height = ui::sequence_panel::height_for(app, rows);
+    app.set_sequence_viewport(panel_width, panel_height);
+}
+
+/// Keys the sequence panel owns while it is open.
+///
+/// Returns `true` when the key was consumed, so anything the panel does not
+/// claim still reaches the normal bindings and the camera stays live.
+fn handle_sequence_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::KeyModifiers;
+
+    // Shift plus an arrow extends the selection from where the cursor was, the
+    // way a text editor does.
+    let extend = key.modifiers.contains(KeyModifiers::SHIFT);
+    match key.code {
+        KeyCode::Left => app.seq_move_horizontal(-1, extend),
+        KeyCode::Right => app.seq_move_horizontal(1, extend),
+        KeyCode::Up => app.seq_move_vertical(-1, extend),
+        KeyCode::Down => app.seq_move_vertical(1, extend),
+        KeyCode::PageUp => app.seq_page(false, extend),
+        KeyCode::PageDown => app.seq_page(true, extend),
+        KeyCode::Home => app.seq_move_to_chain_edge(false, extend),
+        KeyCode::End => app.seq_move_to_chain_edge(true, extend),
+        KeyCode::Enter => app.seq_toggle_selection(),
+        KeyCode::Char('A') => app.seq_toggle_chain_selection(),
+        KeyCode::Char('x') => app.clear_selection(),
+        KeyCode::Char('<') | KeyCode::Char(',') => app.resize_sequence_panel(-1),
+        KeyCode::Char('>') | KeyCode::Char('.') => app.resize_sequence_panel(1),
+        _ => return false,
+    }
+    true
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -435,6 +482,10 @@ fn main() -> Result<()> {
     let mut was_interacting = false;
 
     loop {
+        // Cursor movement is expressed in layout rows, so the layout has to be
+        // current before keys are handled.
+        sync_sequence_viewport(&mut app, (term_cols, term_rows));
+
         // Drain all queued input from the dedicated input thread
         let mut had_input = false;
         while let Ok(app_event) = input_rx.try_recv() {
@@ -447,6 +498,12 @@ fn main() -> Result<()> {
                 }
                 event::AppEvent::Key(key) => {
                     log!(logfile, "key: {:?}", key.code);
+                    // While the panel is open it owns the arrow keys and the
+                    // selection keys; h/j/k/l keep driving the camera, so the
+                    // view stays steerable with the sequence in front of you.
+                    if app.show_sequence && handle_sequence_key(&mut app, key) {
+                        continue;
+                    }
                     match key.code {
                         KeyCode::Char('q') => app.should_quit = true,
                         KeyCode::Char('c')
@@ -533,9 +590,16 @@ fn main() -> Result<()> {
                         KeyCode::Char('I') => app.toggle_interactions(),
                         KeyCode::Char('g') => app.toggle_ligands(),
                         KeyCode::Char('?') => app.show_help = !app.show_help,
+                        KeyCode::Char('S') => app.toggle_sequence_panel(),
+                        KeyCode::Char('b') => app.toggle_ball_stick(),
+                        KeyCode::Char('z') => {
+                            app.focus_on_selection();
+                        }
                         KeyCode::Esc => {
                             if app.show_help {
                                 app.show_help = false;
+                            } else if app.show_sequence {
+                                app.show_sequence = false;
                             }
                         }
                         _ => {}
@@ -636,6 +700,11 @@ fn main() -> Result<()> {
             app.needs_clear = false;
         }
 
+        // ...and again after input, because the key that opened the panel or
+        // resized it arrived after the first sync: the frame about to be drawn
+        // must not be the one frame with a stale layout.
+        sync_sequence_viewport(&mut app, (term_cols, term_rows));
+
         let draw_start = Instant::now();
         terminal.draw(|frame| {
             // If interface is active, split horizontally: sidebar | main
@@ -665,20 +734,25 @@ fn main() -> Result<()> {
                 frame.area()
             };
 
+            let sequence_height = ui::sequence_panel::height_for(&app, main_area.height);
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(1), // Header
-                    Constraint::Min(3),    // Viewport
-                    Constraint::Length(2), // Status bar
-                    Constraint::Length(1), // Help bar
+                    Constraint::Length(1),               // Header
+                    Constraint::Min(3),                  // Viewport
+                    Constraint::Length(sequence_height), // Sequence panel
+                    Constraint::Length(2),               // Status bar
+                    Constraint::Length(1),               // Help bar
                 ])
                 .split(main_area);
 
             ui::header::render_header(frame, chunks[0], &app.protein.name);
             ui::viewport::render_viewport(frame, chunks[1], &app);
-            ui::statusbar::render_statusbar(frame, chunks[2], &app);
-            ui::helpbar::render_helpbar(frame, chunks[3]);
+            if sequence_height > 0 {
+                ui::sequence_panel::render_sequence_panel(frame, chunks[2], &app);
+            }
+            ui::statusbar::render_statusbar(frame, chunks[3], &app);
+            ui::helpbar::render_helpbar(frame, chunks[4], &app);
 
             if app.show_help {
                 ui::help_overlay::render_help_overlay(frame, frame.area());

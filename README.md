@@ -34,6 +34,7 @@ Terminal molecular structure viewer — load, rotate, and explore proteins, nucl
 - **RNA/DNA support** — backbone, wireframe, and cartoon modes with base-type coloring
 - **Small molecule rendering** — ligands as ball-and-stick, ions as spheres
 - **Interface analysis** — inter-chain contacts, binding pockets, and interaction visualization (H-bonds, salt bridges, hydrophobic contacts)
+- **Sequence panel** — scroll every chain's sequence, select residues, and show them as ball-and-stick in the 3D view
 - **7 color schemes** — structure, chain, element (CPK), B-factor, rainbow, pLDDT (AlphaFold)
 - **Interactive controls** — vim-style rotation, zoom, pan with auto-rotation
 - **PDB & mmCIF** — both formats supported, with RCSB PDB fetch (`--fetch`)
@@ -248,9 +249,49 @@ leave the prior frame, state, and revision unchanged.
 | `I` | Interface interactions |
 | `g` | Toggle ligands |
 | `[`/`]` | Prev/next chain |
+| `S` | Sequence panel |
+| `b` | Ball-and-stick for the selection |
+| `z` | Centre the view on the selection |
 | `Space` | Auto-rotate |
 | `?` | Help |
 | `q` | Quit |
+
+While the sequence panel is open it takes the arrow keys; `h`/`j`/`k`/`l` still
+rotate the view, so you can turn the structure while picking residues.
+
+| Key | Action in the sequence panel |
+|-----|------------------------------|
+| `←`/`→` | Move the cursor one residue (across chain ends) |
+| `↑`/`↓` | Move one row |
+| `Shift`+arrow | Extend the selection from the cursor |
+| `PgUp`/`PgDn` | Move a screenful |
+| `Home`/`End` | Start / end of the chain |
+| `Enter` | Select or deselect the residue |
+| `A` | Select or deselect the whole chain |
+| `x` | Clear the selection |
+| `[`/`]` | Jump to the previous / next chain |
+| `<`/`>` | Shrink / grow the panel |
+| `S` / `Esc` | Close the panel |
+
+## Sequence Panel & Residue Selection
+
+Press `S` to open a scrollable panel listing the sequence of every chain in
+one-letter codes — amino acids and nucleotides alike, numbered in the gutter and
+grouped in tens. Each chain gets a header with its type, length, and residue
+range, so a 52-chain ribosome reads as one continuous list.
+
+The cursor moves with the arrow keys; `Enter` picks a residue, `Shift`+arrow
+extends a range, and `A` takes a whole chain. Picked residues are drawn in the
+3D view as ball-and-stick over whatever mode is active, with the selection color
+on carbons and CPK colors elsewhere, z-buffered so a side chain that really is
+behind the structure stays behind it. `b` turns the ball-and-stick off, leaving a
+marker sphere per residue; `z` centres the view on the selection, which is how
+you find a handful of residues inside something the size of a ribosome. The
+selection survives closing the panel, and the status bar keeps its count.
+
+Letters are colored by the active color scheme, so the panel and the structure
+read as one picture; the selection and cursor colors come from `[selection]` in
+the palette file.
 
 ## Color Schemes
 

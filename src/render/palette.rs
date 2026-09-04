@@ -233,6 +233,30 @@ impl Default for LigandPalette {
     }
 }
 
+/// Colors for residues picked in the sequence panel.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SelectionPalette {
+    /// Carbon atoms of the ball-and-stick overlay.  Other elements keep their
+    /// CPK colors, so a picked residue reads as itself while still standing
+    /// out from the ribbon behind it.
+    pub carbon: Rgb,
+    /// Marker sphere drawn on a picked residue when ball-and-stick is off.
+    pub marker: Rgb,
+    /// Background of the sequence panel's cursor cell.
+    pub cursor: Rgb,
+}
+
+impl Default for SelectionPalette {
+    fn default() -> Self {
+        Self {
+            carbon: Rgb::new(0, 230, 140),
+            marker: Rgb::new(0, 230, 140),
+            cursor: Rgb::new(255, 200, 0),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Palette
 // ---------------------------------------------------------------------------
@@ -249,6 +273,7 @@ pub struct Palette {
     pub bfactor: BFactorPalette,
     pub interface: InterfacePalette,
     pub ligand: LigandPalette,
+    pub selection: SelectionPalette,
 }
 
 impl Default for Palette {
@@ -271,6 +296,7 @@ impl Default for Palette {
             bfactor: BFactorPalette::default(),
             interface: InterfacePalette::default(),
             ligand: LigandPalette::default(),
+            selection: SelectionPalette::default(),
         }
     }
 }
@@ -319,6 +345,7 @@ struct PaletteFile {
     bfactor: BFactorPalette,
     interface: InterfacePalette,
     ligand: LigandPalette,
+    selection: SelectionPalette,
 }
 
 impl PaletteFile {
@@ -332,6 +359,7 @@ impl PaletteFile {
             bfactor: self.bfactor,
             interface: self.interface,
             ligand: self.ligand,
+            selection: self.selection,
         };
 
         if let Some(colors) = self.chain.colors {

@@ -1040,14 +1040,14 @@ pub fn normalize(v: [f64; 3]) -> [f64; 3] {
 /// The X component is negative to compensate for the camera's X-negation
 /// (which corrects chirality so L-amino acids render correctly).  In screen
 /// space this still appears as upper-right lighting.
-/// Ambient floor for sphere shading.
+/// Ambient floor for sphere shading, and with it the contrast across an atom.
 ///
-/// Set so the average pixel keeps about four fifths of its colour: enough
-/// variation across each atom to read as a ball, without dimming a dense
-/// structure into mud once depth fog is applied on top.  A one-sided Lambert
-/// term would average barely half, which looked markedly darker than the flat
-/// discs it replaces.
-const SPHERE_AMBIENT: f64 = 0.70;
+/// Kept a little above the ribbon's own floor: an atom is often only a few
+/// pixels across, where the full ribbon contrast turns into high-frequency
+/// speckle rather than form.  A one-sided Lambert term would average barely
+/// half the colour, which read as markedly darker than the flat discs it
+/// replaces once depth fog was applied on top.
+const SPHERE_AMBIENT: f64 = 0.50;
 
 /// Shade one pixel of an atom as a point on a sphere rather than a flat disc.
 ///

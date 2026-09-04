@@ -234,7 +234,17 @@ fn render_cartoon_tiled(
     cache: &crate::render::camera::ProjectionCache,
     ctx: &TiledRenderCtx,
 ) {
-    const AMBIENT: f64 = 0.55;
+    // Ambient floor, and with it the shading contrast: intensity runs from
+    // AMBIENT on the unlit side to 1.0 facing the light.
+    //
+    // This used to be 0.55 applied to `abs(dot) * 0.4 + 0.6`, which spans only
+    // 0.82..1.00 -- a barely visible 18% -- so cartoons came out looking flat
+    // and washed out.  That formula was compensating for normals whose sign was
+    // arbitrary: rings inherited their winding from a frame that flips along
+    // the spline, so `abs` was the only way to shade them consistently.  Now
+    // that the mesh is wound outward throughout, the true normal can be used
+    // and the range opened up to something that actually reads as form.
+    const AMBIENT: f64 = 0.35;
     let half_w = ctx.half_w;
     let half_h = ctx.half_h;
     let px_w = ctx.px_w;
@@ -298,9 +308,15 @@ fn render_cartoon_tiled(
 
                 // Two-sided half-Lambert shading (identical to `rasterize_triangle_depth`).
                 let rn = cache.rotate_normal(tri.normal[0], tri.normal[1], tri.normal[2]);
-                let dot = rn[0] * light_dir[0] + rn[1] * light_dir[1] + rn[2] * light_dir[2];
-                let half_lambert = dot.abs() * 0.4 + 0.6;
-                let intensity = AMBIENT + (1.0 - AMBIENT) * half_lambert;
+                // Depth increases away from the viewer, so a normal facing the
+                // camera has negative z; the light is specified in front of the
+                // scene.  Flip z to put the two in the same frame.
+                let dot = rn[0] * light_dir[0] + rn[1] * light_dir[1] - rn[2] * light_dir[2];
+                // Half-Lambert wrap: the terminator is soft, so a ribbon
+                // turning away from the light shades off gradually instead of
+                // hitting a hard edge, and nothing goes black.
+                let wrapped = dot.mul_add(0.5, 0.5);
+                let intensity = AMBIENT + (1.0 - AMBIENT) * wrapped;
                 let shaded: [u8; 3] = [
                     (tri.color[0] as f64 * intensity).min(255.0) as u8,
                     (tri.color[1] as f64 * intensity).min(255.0) as u8,

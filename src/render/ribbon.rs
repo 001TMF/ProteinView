@@ -398,6 +398,68 @@ fn triangle_normal(v0: V3, v1: V3, v2: V3) -> V3 {
 }
 
 // ---------------------------------------------------------------------------
+// Consistently wound triangle emission
+// ---------------------------------------------------------------------------
+
+/// Mean of a set of points.
+fn centroid(points: &[V3]) -> V3 {
+    if points.is_empty() {
+        return [0.0; 3];
+    }
+    let sum = points.iter().fold([0.0; 3], |acc: V3, p| v3_add(acc, *p));
+    v3_scale(sum, 1.0 / points.len() as f64)
+}
+
+/// Push a triangle, forcing its winding to agree with `outward`.
+///
+/// Every cross-section ring is built from a reference frame carried along the
+/// spline, and that frame can flip sign partway down a chain.  When it does,
+/// the ring's vertex order reverses, and so does the winding of every triangle
+/// built from it -- which is why the mesh used to contain a mix of clockwise
+/// and counter-clockwise faces and could not be back-face culled.
+///
+/// Orienting each triangle against a direction known to point out of the
+/// surface makes the winding globally consistent, and makes the stored normal a
+/// genuine outward normal rather than whatever the vertex order implied.
+fn push_oriented(
+    v0: V3,
+    v1: V3,
+    v2: V3,
+    outward: V3,
+    color: [u8; 3],
+    out: &mut Vec<RibbonTriangle>,
+) {
+    let normal = triangle_normal(v0, v1, v2);
+    if v3_dot(normal, outward) < 0.0 {
+        // Swapping two vertices reverses the winding, and with it the normal.
+        out.push(RibbonTriangle {
+            verts: [v0, v2, v1],
+            color,
+            normal: v3_scale(normal, -1.0),
+        });
+    } else {
+        out.push(RibbonTriangle {
+            verts: [v0, v1, v2],
+            color,
+            normal,
+        });
+    }
+}
+
+/// Push a triangle, reversing its winding when `flip` is set.
+///
+/// Used where the correct orientation is known for a whole run of triangles at
+/// once, which is more reliable than testing each one on its own.
+fn push_wound(v0: V3, v1: V3, v2: V3, flip: bool, color: [u8; 3], out: &mut Vec<RibbonTriangle>) {
+    let verts = if flip { [v0, v2, v1] } else { [v0, v1, v2] };
+    out.push(RibbonTriangle {
+        verts,
+        color,
+        normal: triangle_normal(verts[0], verts[1], verts[2]),
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Emit triangle strip between two cross-sections
 // ---------------------------------------------------------------------------
 
@@ -410,6 +472,36 @@ fn emit_strip(ring_a: &[V3], ring_b: &[V3], color: [u8; 3], out: &mut Vec<Ribbon
         return;
     }
 
+    // The rings are closed cross-sections, so their centroids sit on the tube
+    // axis and the vector between them is the local tangent.
+    let axis_a = centroid(ring_a);
+    let axis_b = centroid(ring_b);
+    let tangent = v3_sub(axis_b, axis_a);
+
+    // Decide the winding once, from the ring's own geometry.
+    //
+    // Doing it per triangle -- "is this face pointing away from the axis?" --
+    // works for the tube's sides but fails on a sheet arrowhead, where the
+    // strip between a narrow ring and the wider ring behind it forms the barb:
+    // a face pointing back along the axis, not outward from it.  There the
+    // radial test is reading a near-zero dot product and its sign is noise, so
+    // barbs came out inconsistently wound and were wrongly culled.
+    //
+    // The ring's signed area vector has no such ambiguity.  Compared against
+    // the tangent it says which way round the ring runs, which fixes the
+    // winding of every triangle in the strip, barbs included.
+    let mut area = [0.0; 3];
+    for i in 0..n {
+        let j = (i + 1) % n;
+        area = v3_add(
+            area,
+            v3_cross(v3_sub(ring_a[i], axis_a), v3_sub(ring_a[j], axis_a)),
+        );
+    }
+    // For a ring running counter-clockwise about the tangent, the vertex order
+    // below already yields outward-facing triangles.
+    let flip = v3_dot(area, tangent) < 0.0;
+
     for i in 0..n {
         let j = (i + 1) % n;
 
@@ -419,51 +511,40 @@ fn emit_strip(ring_a: &[V3], ring_b: &[V3], color: [u8; 3], out: &mut Vec<Ribbon
         let b1 = ring_b[j];
 
         // Quad (a0, a1, b1, b0) -> two triangles.
-        // Triangle 1: a0, a1, b0
-        let n1 = triangle_normal(a0, a1, b0);
-        out.push(RibbonTriangle {
-            verts: [a0, a1, b0],
-            color,
-            normal: n1,
-        });
-
-        // Triangle 2: a1, b1, b0
-        let n2 = triangle_normal(a1, b1, b0);
-        out.push(RibbonTriangle {
-            verts: [a1, b1, b0],
-            color,
-            normal: n2,
-        });
+        push_wound(a0, a1, b0, flip, color, out);
+        push_wound(a1, b1, b0, flip, color, out);
     }
 }
 
+/// Outward axis directions for the two end caps of a spline.
+///
+/// The cap at each end faces along the tube axis, away from the body, which is
+/// the direction from the neighbouring spline point toward the end point.
+fn end_axes(spline_points: &[SplinePoint]) -> (V3, V3) {
+    let n = spline_points.len();
+    if n < 2 {
+        // Degenerate run: any consistent pair will do, nothing is visible.
+        return ([0.0, 0.0, -1.0], [0.0, 0.0, 1.0]);
+    }
+    let front = v3_normalize(v3_sub(spline_points[0].pos, spline_points[1].pos));
+    let back = v3_normalize(v3_sub(spline_points[n - 1].pos, spline_points[n - 2].pos));
+    (front, back)
+}
+
 /// Emit a cap (disc) to close the end of a tube or ribbon.
-/// `ring` is the cross-section ring, `center` is the spline point center,
-/// and `facing_forward` controls the winding direction.
-fn emit_cap(
-    ring: &[V3],
-    center: V3,
-    color: [u8; 3],
-    facing_forward: bool,
-    out: &mut Vec<RibbonTriangle>,
-) {
+///
+/// `ring` is the cross-section ring and `center` its spline point.  `outward`
+/// is the tube axis direction pointing away from the body of the tube, which is
+/// the cap's true surface normal; it decides the winding, so the caps are
+/// consistent with the strips around them.
+fn emit_cap(ring: &[V3], center: V3, color: [u8; 3], outward: V3, out: &mut Vec<RibbonTriangle>) {
     let n = ring.len();
     if n < 3 {
         return;
     }
     for i in 0..n {
         let j = (i + 1) % n;
-        let (v0, v1) = if facing_forward {
-            (ring[i], ring[j])
-        } else {
-            (ring[j], ring[i])
-        };
-        let norm = triangle_normal(center, v0, v1);
-        out.push(RibbonTriangle {
-            verts: [center, v0, v1],
-            color,
-            normal: norm,
-        });
+        push_oriented(center, ring[i], ring[j], outward, color, out);
     }
 }
 
@@ -692,12 +773,14 @@ fn build_spline_tube(records: &[CaRecord], lod: &LodConfig, out: &mut Vec<Ribbon
     }
 
     // --- Step 5: Cap both ends ---
+    let (front_out, back_out) = end_axes(&spline_points);
+
     let first_ring = cross_section(&spline_points[0], lod);
     emit_cap(
         &first_ring,
         spline_points[0].pos,
         spline_points[0].color,
-        false,
+        front_out,
         out,
     );
 
@@ -706,7 +789,7 @@ fn build_spline_tube(records: &[CaRecord], lod: &LodConfig, out: &mut Vec<Ribbon
         &last_ring,
         spline_points.last().unwrap().pos,
         spline_points.last().unwrap().color,
-        true,
+        back_out,
         out,
     );
 }
@@ -929,12 +1012,14 @@ fn generate_chain_ribbon(
     }
 
     // 7. Cap the ends of the ribbon.
+    let (front_out, back_out) = end_axes(&spline_points);
+
     let first_ring = cross_section(&spline_points[0], lod);
     emit_cap(
         &first_ring,
         spline_points[0].pos,
         spline_points[0].color,
-        false,
+        front_out,
         out,
     );
 
@@ -943,7 +1028,7 @@ fn generate_chain_ribbon(
         &last_ring,
         spline_points.last().unwrap().pos,
         spline_points.last().unwrap().color,
-        true,
+        back_out,
         out,
     );
 }
@@ -1077,36 +1162,44 @@ fn generate_nucleic_acid_ribbon(
         let b_br = v3_sub(centroid, v3_add(w_off, t_off));
         let b_bl = v3_add(centroid, v3_sub(w_off, t_off));
 
+        // The slab is symmetric about the midpoint of its two end faces, so
+        // that midpoint is inside it and orients every face outward.
+        let interior = v3_scale(v3_add(c1_prime, centroid), 0.5);
+
         // Emit 6 faces x 2 triangles = 12 triangles.
         // Front face (at C1')
-        emit_quad(f_tl, f_tr, f_br, f_bl, color, out);
+        emit_quad(f_tl, f_tr, f_br, f_bl, interior, color, out);
         // Back face (at centroid)
-        emit_quad(b_tr, b_tl, b_bl, b_br, color, out);
+        emit_quad(b_tr, b_tl, b_bl, b_br, interior, color, out);
         // Top face
-        emit_quad(f_tl, b_tl, b_tr, f_tr, color, out);
+        emit_quad(f_tl, b_tl, b_tr, f_tr, interior, color, out);
         // Bottom face
-        emit_quad(f_bl, f_br, b_br, b_bl, color, out);
+        emit_quad(f_bl, f_br, b_br, b_bl, interior, color, out);
         // Left face
-        emit_quad(f_tl, f_bl, b_bl, b_tl, color, out);
+        emit_quad(f_tl, f_bl, b_bl, b_tl, interior, color, out);
         // Right face
-        emit_quad(f_tr, b_tr, b_br, f_br, color, out);
+        emit_quad(f_tr, b_tr, b_br, f_br, interior, color, out);
     }
 }
 
-/// Emit two triangles for a quad face (v0, v1, v2, v3) with correct normals.
-fn emit_quad(v0: V3, v1: V3, v2: V3, v3: V3, color: [u8; 3], out: &mut Vec<RibbonTriangle>) {
-    let n1 = triangle_normal(v0, v1, v2);
-    out.push(RibbonTriangle {
-        verts: [v0, v1, v2],
-        color,
-        normal: n1,
-    });
-    let n2 = triangle_normal(v0, v2, v3);
-    out.push(RibbonTriangle {
-        verts: [v0, v2, v3],
-        color,
-        normal: n2,
-    });
+/// Emit two triangles for a quad face (v0, v1, v2, v3).
+///
+/// `interior` is a point inside the solid the face belongs to, which orients
+/// both triangles outward.
+fn emit_quad(
+    v0: V3,
+    v1: V3,
+    v2: V3,
+    v3: V3,
+    interior: V3,
+    color: [u8; 3],
+    out: &mut Vec<RibbonTriangle>,
+) {
+    let third = 1.0 / 3.0;
+    let c1 = v3_scale(v3_add(v3_add(v0, v1), v2), third);
+    push_oriented(v0, v1, v2, v3_sub(c1, interior), color, out);
+    let c2 = v3_scale(v3_add(v3_add(v0, v2), v3), third);
+    push_oriented(v0, v2, v3, v3_sub(c2, interior), color, out);
 }
 
 // ---------------------------------------------------------------------------
@@ -1296,5 +1389,72 @@ mod tests {
                 i
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod winding_tests {
+    use super::*;
+    use crate::render::color::{ColorScheme, ColorSchemeType};
+    use std::collections::HashMap;
+
+    /// Every triangle in the ribbon mesh must be wound the same way round.
+    ///
+    /// Each shared edge should appear once in each direction.  An edge used
+    /// twice in the *same* direction means two neighbouring triangles disagree
+    /// about which side is out, which leaves the stored normals arbitrarily
+    /// signed and rules out back-face culling.
+    fn assert_consistent_winding(path: &str) {
+        let mut protein = crate::parser::pdb::load_structure(path).unwrap();
+        protein.center();
+        let scheme = ColorScheme::new(ColorSchemeType::Structure, protein.residue_count());
+        let mesh = generate_ribbon_mesh(&protein, &scheme);
+        assert!(!mesh.is_empty(), "{path} produced no ribbon geometry");
+
+        let key = |v: V3| {
+            const SCALE: f64 = 4096.0;
+            (
+                (v[0] * SCALE).round() as i64,
+                (v[1] * SCALE).round() as i64,
+                (v[2] * SCALE).round() as i64,
+            )
+        };
+        let mut directed: HashMap<((i64, i64, i64), (i64, i64, i64)), i32> = HashMap::new();
+        for tri in &mesh {
+            let k = [key(tri.verts[0]), key(tri.verts[1]), key(tri.verts[2])];
+            for i in 0..3 {
+                *directed.entry((k[i], k[(i + 1) % 3])).or_insert(0) += 1;
+            }
+        }
+
+        let mismatched: i32 = directed
+            .iter()
+            .filter(|&(&(u, v), &n)| {
+                let back = directed.get(&(v, u)).copied().unwrap_or(0);
+                back != 0 && back != n
+            })
+            .map(|(_, &n)| n)
+            .sum();
+        assert_eq!(
+            mismatched, 0,
+            "{path}: {mismatched} inconsistently wound edges"
+        );
+    }
+
+    #[test]
+    fn protein_ribbons_are_consistently_wound() {
+        assert_consistent_winding("examples/1UBQ.pdb");
+        assert_consistent_winding("examples/4HHB.pdb");
+    }
+
+    #[test]
+    fn nucleic_acid_ribbons_are_consistently_wound() {
+        assert_consistent_winding("examples/1BNA.pdb");
+        assert_consistent_winding("examples/1RNA.pdb");
+    }
+
+    #[test]
+    fn mixed_structures_are_consistently_wound() {
+        assert_consistent_winding("examples/1AOI.pdb");
     }
 }

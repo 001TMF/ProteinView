@@ -4,6 +4,17 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use rayon::prelude::*;
 
+/// Depth span, in angstroms, at which the caller's fog strength applies as
+/// given.  Roughly the depth of a small single-domain protein, so structures of
+/// that size and below keep exactly the appearance they always had.
+const FOG_REFERENCE_DEPTH: f64 = 55.0;
+
+/// Ceiling on the depth-scaled fog strength.
+///
+/// At this blend a distant feature keeps a quarter of its own color: clearly
+/// receded, still identifiable.  Reached at roughly twice the reference depth.
+const FOG_MAX_STRENGTH: f64 = 0.75;
+
 /// RGB pixel framebuffer with z-buffer for software rasterization.
 ///
 /// Pixel coordinates: (0,0) is top-left, x increases right, y increases down.
@@ -176,9 +187,22 @@ impl Framebuffer {
     ///
     /// - Nearest pixels (z == z_min) keep their original color
     /// - Farthest pixels (z == z_max) are blended most toward `fog_color`
-    /// - The `fog_strength` parameter (0.0..=1.0) controls the maximum blend
+    /// - The `fog_strength` parameter (0.0..=1.0) sets the blend at the far
+    ///   plane for a structure no deeper than [`FOG_REFERENCE_DEPTH`]
     ///
-    /// Background pixels (depth == INFINITY) remain unchanged (black).
+    /// # Why the strength scales with depth
+    ///
+    /// The ramp is normalized across the structure's own depth range, so the
+    /// contrast between two features a fixed distance apart is inversely
+    /// proportional to how deep the whole structure is.  At a fixed strength a
+    /// 10 A separation is a clear 0.065 of blend in a small protein but 0.015
+    /// in a ribosome -- invisible, which is exactly when depth cues matter
+    /// most, because that is when everything overlaps.
+    ///
+    /// Scaling the strength with the depth span restores roughly constant
+    /// discrimination per angstrom, up to [`FOG_MAX_STRENGTH`], which bounds
+    /// how much of a distant feature's own color is allowed to wash out.
+    /// Structures at or below the reference depth are unaffected.
     pub fn apply_depth_tint(&mut self, fog_color: [u8; 3], fog_strength: f64) {
         // Find z_min and z_max across all valid (non-background) pixels.
         let (z_min, z_max) = self
@@ -200,6 +224,12 @@ impl Framebuffer {
             return;
         }
 
+        // Depth is in world units (angstroms): the projection applies zoom only
+        // to x and y, so this scaling is independent of how far the user has
+        // zoomed in.
+        let strength = (fog_strength * f64::from(z_range) / FOG_REFERENCE_DEPTH)
+            .clamp(fog_strength, FOG_MAX_STRENGTH);
+
         let inv_range = 1.0 / z_range;
 
         // Per-pixel and independent -- parallelize over rows.
@@ -211,7 +241,7 @@ impl Framebuffer {
                     return; // background pixel — leave black
                 }
                 let t = ((d - z_min) * inv_range).clamp(0.0, 1.0);
-                let blend = t as f64 * fog_strength;
+                let blend = t as f64 * strength;
                 c[0] = (c[0] as f64 + (fog_color[0] as f64 - c[0] as f64) * blend).clamp(0.0, 255.0)
                     as u8;
                 c[1] = (c[1] as f64 + (fog_color[1] as f64 - c[1] as f64) * blend).clamp(0.0, 255.0)
@@ -608,6 +638,8 @@ impl Framebuffer {
         }
 
         let r_sq = radius * radius;
+        let inv_r = if radius > 0.0 { 1.0 / radius } else { 0.0 };
+        let light = default_light_dir();
 
         for py in iy_min..=iy_max {
             let dy = py as f64 + 0.5 - cy;
@@ -617,8 +649,10 @@ impl Framebuffer {
             }
             for px in ix_min..=ix_max {
                 let dx = px as f64 + 0.5 - cx;
-                if dx * dx + dy_sq <= r_sq {
-                    self.set_pixel(px, py, z as f32, color);
+                let d_sq = dx * dx + dy_sq;
+                if d_sq <= r_sq {
+                    let shaded = shade_sphere(dx * inv_r, dy * inv_r, d_sq / r_sq, light, color);
+                    self.set_pixel(px, py, z as f32, shaded);
                 }
             }
         }
@@ -1006,6 +1040,51 @@ pub fn normalize(v: [f64; 3]) -> [f64; 3] {
 /// The X component is negative to compensate for the camera's X-negation
 /// (which corrects chirality so L-amino acids render correctly).  In screen
 /// space this still appears as upper-right lighting.
+/// Ambient floor for sphere shading.
+///
+/// Set so the average pixel keeps about four fifths of its colour: enough
+/// variation across each atom to read as a ball, without dimming a dense
+/// structure into mud once depth fog is applied on top.  A one-sided Lambert
+/// term would average barely half, which looked markedly darker than the flat
+/// discs it replaces.
+const SPHERE_AMBIENT: f64 = 0.70;
+
+/// Shade one pixel of an atom as a point on a sphere rather than a flat disc.
+///
+/// Backbone and ligand atoms are drawn as filled circles of one flat colour.
+/// On a small structure that is fine, but a large one is tens of thousands of
+/// them overlapping, and a field of flat discs has no form at all -- the eye
+/// gets no cue for which atom is in front of which, and the render reads as
+/// confetti.  Treating each disc as the silhouette of a sphere costs one
+/// square root per pixel and gives every atom a highlight and a shaded limb,
+/// which is what makes a dense structure legible.
+///
+/// `nx`/`ny` are the pixel's offset from the centre in radii, and `d_sq_norm`
+/// is that offset's squared length, so the surface normal follows from the
+/// sphere equation.  Screen y runs downward while the light is specified in a
+/// y-up view space, hence the flip.
+#[inline]
+fn shade_sphere(nx: f64, ny: f64, d_sq_norm: f64, light: [f64; 3], color: [u8; 3]) -> [u8; 3] {
+    // The z axis here is the light's own, not the depth buffer's: `light` has a
+    // positive z and is meant to sit in front of the scene, so the face of the
+    // sphere pointing at the viewer takes +z and catches the highlight.  The
+    // triangle rasterizer never had to pick a side because it shades with
+    // `abs(dot)`; a sphere does, or the highlight lands on the wrong limb.
+    let nz = (1.0 - d_sq_norm).max(0.0).sqrt();
+    // Screen y runs downward while the light is given in a y-up view space.
+    let dot = nx * light[0] - ny * light[1] + nz * light[2];
+    // Half-Lambert wrap, as the triangle rasterizer uses: it keeps the unlit
+    // limb from going flat black, which matters when atoms are only a few
+    // pixels across and a hard terminator would just read as noise.
+    let wrapped = dot.mul_add(0.5, 0.5);
+    let intensity = SPHERE_AMBIENT + (1.0 - SPHERE_AMBIENT) * wrapped;
+    [
+        (f64::from(color[0]) * intensity).min(255.0) as u8,
+        (f64::from(color[1]) * intensity).min(255.0) as u8,
+        (f64::from(color[2]) * intensity).min(255.0) as u8,
+    ]
+}
+
 pub fn default_light_dir() -> [f64; 3] {
     normalize([-0.3, 0.8, 0.5])
 }
@@ -1091,10 +1170,41 @@ mod tests {
     fn test_draw_circle() {
         let mut fb = Framebuffer::new(20, 20);
         fb.draw_circle(10.0, 10.0, 3.0, [128, 64, 32]);
-        // Center pixel should be filled
-        assert_eq!(fb.color[10 * 20 + 10], [128, 64, 32]);
+        // Center pixel is filled, shaded rather than the flat input colour.
+        let center = fb.color[10 * 20 + 10];
+        assert!(
+            center != [0, 0, 0],
+            "centre should be drawn, got {center:?}"
+        );
+        assert!(
+            center[0] <= 128 && center[0] > 64,
+            "centre should be lit but not brighter than the base colour, got {center:?}"
+        );
         // Far corner should not be
         assert_eq!(fb.color[0], [0, 0, 0]);
+    }
+
+    /// Atoms are shaded as spheres, so a disc is not a flat patch of colour:
+    /// it has a highlight toward the light and a darker limb away from it.
+    #[test]
+    fn draw_circle_shades_like_a_sphere() {
+        let mut fb = Framebuffer::new(40, 40);
+        fb.draw_circle(20.0, 20.0, 10.0, [200, 200, 200]);
+
+        let at = |x: usize, y: usize| fb.color[y * 40 + x][0];
+        let centre = at(20, 20);
+        // The default light comes from the upper left.
+        let toward_light = at(15, 15);
+        let away_from_light = at(25, 25);
+
+        assert!(
+            toward_light > away_from_light,
+            "lit limb {toward_light} should be brighter than the far limb {away_from_light}"
+        );
+        assert!(
+            toward_light >= centre && centre >= away_from_light,
+            "brightness should fall off across the sphere: {toward_light} / {centre} / {away_from_light}"
+        );
     }
 
     #[test]

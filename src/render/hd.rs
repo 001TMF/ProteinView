@@ -279,6 +279,18 @@ fn render_cartoon_tiled(
                 // Off-screen or degenerate: emit a culled entry rather than
                 // filtering, so the parallel map stays indexed and can write
                 // straight into the reused buffer without any reallocation.
+                //
+                // Back faces are *not* culled here, though the winding is now
+                // consistent enough to do it (see `ribbon::push_wound`).  The
+                // ribbon surface is not watertight: a sheet's arrowhead and the
+                // coil after it meet at a T-junction, where a vertex lands
+                // mid-edge on its neighbour.  Edge counts can be balanced by
+                // sealing the gaps, but the T-junctions still crack open into
+                // hairline slivers once the back faces behind them stop being
+                // drawn.  Culling saves a few milliseconds on a frame that
+                // already fits its budget several times over, which does not
+                // justify shipping those artifacts; it needs the arrowhead
+                // seam re-tessellated first.
                 if min_x > max_x || min_y > max_y || denom.abs() < 1e-12 {
                     return ProjectedTriangle::CULLED;
                 }

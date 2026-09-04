@@ -4,9 +4,12 @@ use ratatui::widgets::canvas::{Canvas, Context, Line};
 use crate::app::VizMode;
 use crate::model::interface::{Interaction, InteractionType};
 use crate::model::protein::{LigandType, MoleculeType, Protein};
+use crate::model::residue_selection::SelectionView;
 use crate::render::bond::atoms_bonded;
 use crate::render::camera::Camera;
 use crate::render::color::ColorScheme;
+use crate::render::hd::{linking_atoms, selection_atom_color};
+use crate::render::palette::palette;
 
 /// Draw a thick line by rendering parallel offset lines along the perpendicular direction.
 fn draw_thick_line(
@@ -56,6 +59,7 @@ pub fn render_protein<'a>(
     height: f64,
     show_ligands: bool,
     interactions: &'a [Interaction],
+    selection: Option<SelectionView<'a>>,
 ) -> Canvas<'a, impl Fn(&mut Context<'_>) + 'a> {
     Canvas::default()
         .marker(Marker::Braille)
@@ -73,6 +77,10 @@ pub fn render_protein<'a>(
 
             if show_ligands {
                 render_ligands(ctx, protein, camera, color_scheme);
+            }
+
+            if let Some(view) = selection.filter(|view| !view.selection.is_empty()) {
+                render_selection(ctx, protein, view, camera);
             }
 
             if !interactions.is_empty() {
@@ -244,6 +252,109 @@ fn render_ligands(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// A small plus sign, the canvas stand-in for a dot.
+fn draw_cross(ctx: &mut Context<'_>, x: f64, y: f64, size: f64, color: ratatui::style::Color) {
+    ctx.draw(&Line {
+        x1: x - size,
+        y1: y,
+        x2: x + size,
+        y2: y,
+        color,
+    });
+    ctx.draw(&Line {
+        x1: x,
+        y1: y - size,
+        x2: x,
+        y2: y + size,
+        color,
+    });
+}
+
+/// Draw residues picked in the sequence panel over the braille canvas.
+///
+/// The canvas has no depth buffer, so this is drawn last and always wins: in
+/// braille mode the selection is a marker, not a shaded overlay.
+fn render_selection(
+    ctx: &mut Context<'_>,
+    protein: &Protein,
+    view: SelectionView<'_>,
+    camera: &Camera,
+) {
+    let carbon = palette().selection.carbon.0;
+    let marker = palette().selection.marker.0;
+    let marker_color = ratatui::style::Color::Rgb(marker[0], marker[1], marker[2]);
+    let offsets: [f64; 3] = [0.0, 0.4, -0.4];
+
+    for (chain_index, chain) in protein.chains.iter().enumerate() {
+        for (residue_index, residue) in chain.residues.iter().enumerate() {
+            if !view.selection.contains(chain_index, residue_index) {
+                continue;
+            }
+
+            if !view.ball_and_stick {
+                if let Some(atom) = residue
+                    .atoms
+                    .iter()
+                    .find(|atom| atom.is_backbone)
+                    .or_else(|| residue.atoms.first())
+                {
+                    let proj = camera.project(atom.x, atom.y, atom.z);
+                    draw_cross(ctx, proj.x, proj.y, 1.2, marker_color);
+                }
+                continue;
+            }
+
+            let projected: Vec<_> = residue
+                .atoms
+                .iter()
+                .map(|atom| {
+                    let proj = camera.project(atom.x, atom.y, atom.z);
+                    let [r, g, b] = selection_atom_color(atom, carbon);
+                    (atom, proj, ratatui::style::Color::Rgb(r, g, b))
+                })
+                .collect();
+
+            // A dot per atom: the canvas has no filled circles, and without
+            // this a residue modelled as a lone C-alpha would draw nothing at
+            // all, since there is no bond to draw.
+            for (_, proj, color) in &projected {
+                draw_cross(ctx, proj.x, proj.y, 0.6, *color);
+            }
+
+            for i in 0..projected.len() {
+                for j in (i + 1)..projected.len() {
+                    let (a1, p1, color) = &projected[i];
+                    let (a2, p2, _) = &projected[j];
+                    if atoms_bonded(&a1.element, a1.x, a1.y, a1.z, &a2.element, a2.x, a2.y, a2.z) {
+                        draw_thick_line(ctx, p1.x, p1.y, p2.x, p2.y, *color, &offsets);
+                    }
+                }
+            }
+
+            if !view.selection.contains(chain_index, residue_index + 1) {
+                continue;
+            }
+            let Some(next) = chain.residues.get(residue_index + 1) else {
+                continue;
+            };
+            if let Some((from, to)) = linking_atoms(chain.molecule_type, residue, next) {
+                let p1 = camera.project(from.x, from.y, from.z);
+                let p2 = camera.project(to.x, to.y, to.z);
+                let [r, g, b] = selection_atom_color(from, carbon);
+                draw_thick_line(
+                    ctx,
+                    p1.x,
+                    p1.y,
+                    p2.x,
+                    p2.y,
+                    ratatui::style::Color::Rgb(r, g, b),
+                    &offsets,
+                );
             }
         }
     }

@@ -1,10 +1,12 @@
 use crate::app::VizMode;
 use crate::model::interface::{Interaction, InteractionType};
-use crate::model::protein::{LigandType, MoleculeType, Protein};
+use crate::model::protein::{Atom, LigandType, MoleculeType, Protein, Residue};
+use crate::model::residue_selection::SelectionView;
 use crate::render::bond::atoms_bonded;
 use crate::render::camera::Camera;
 use crate::render::color::{ColorScheme, color_to_rgb};
 use crate::render::framebuffer::{Framebuffer, default_light_dir};
+use crate::render::palette::palette;
 use crate::render::ribbon::RibbonTriangle;
 use rayon::prelude::*;
 
@@ -24,6 +26,44 @@ pub fn render_hd_framebuffer(
     mesh: &[RibbonTriangle],
     show_ligands: bool,
     interactions: &[Interaction],
+    selection: Option<SelectionView<'_>>,
+) -> Framebuffer {
+    render_hd_framebuffer_ssaa(
+        protein,
+        camera,
+        color_scheme,
+        viz_mode,
+        width,
+        height,
+        mesh,
+        show_ligands,
+        interactions,
+        selection,
+        1.0,
+    )
+}
+
+/// Like [`render_hd_framebuffer`], but aware that the caller intends to
+/// downsample the result by a factor of `ssaa` before display.
+///
+/// `width` / `height` are the *supersampled* framebuffer dimensions, i.e. the
+/// output resolution already multiplied by `ssaa`.  The factor is needed
+/// separately because line thickness and circle radii must be derived from the
+/// **output** resolution and then scaled up, so that features downsample to the
+/// same apparent size rather than becoming proportionally thinner.
+#[allow(clippy::too_many_arguments)]
+pub fn render_hd_framebuffer_ssaa(
+    protein: &Protein,
+    camera: &Camera,
+    color_scheme: &ColorScheme,
+    viz_mode: VizMode,
+    width: f64,
+    height: f64,
+    mesh: &[RibbonTriangle],
+    show_ligands: bool,
+    interactions: &[Interaction],
+    selection: Option<SelectionView<'_>>,
+    ssaa: f64,
 ) -> Framebuffer {
     let px_w = width as usize;
     let px_h = height as usize;
@@ -36,12 +76,23 @@ pub fn render_hd_framebuffer(
     let half_w = px_w as f64 / 2.0;
     let half_h = px_h as f64 / 2.0;
 
-    // Scale line thickness and circle radii relative to framebuffer size.
+    // Scale line thickness and circle radii relative to the *output* size.
     // Values were tuned at ~160px wide (braille resolution) where 1.5px
     // lines and circles look correct.  At FullHD (~640px+) we scale up
     // proportionally.  Floor of 1.0 preserves the original look at low
     // resolutions; ceiling of 3.0 caps growth on 4K terminals.
-    let ts = (px_w as f64 / 500.0).clamp(1.0, 3.0);
+    //
+    // When supersampling, the clamp must be evaluated against the resolution
+    // the user actually sees and only then multiplied by `ssaa`.  Deriving it
+    // from the supersampled width instead would let the clamp floor absorb the
+    // factor and render features too thin once downsampled.
+    let ssaa = if ssaa.is_finite() && ssaa >= 1.0 {
+        ssaa
+    } else {
+        1.0
+    };
+    let output_px_w = px_w as f64 / ssaa;
+    let ts = (output_px_w / 500.0).clamp(1.0, 3.0) * ssaa;
 
     // Pre-compute sin/cos once for the entire frame instead of per-vertex.
     let cache = camera.projection_cache();
@@ -70,6 +121,13 @@ pub fn render_hd_framebuffer(
         render_ligands_fb(&mut fb, protein, camera, color_scheme, half_w, half_h, ts);
     }
 
+    // Residues picked in the sequence panel, drawn over whatever mode is
+    // active but still z-buffered against it, so a picked side chain is hidden
+    // when the structure genuinely occludes it.
+    if let Some(view) = selection.filter(|view| !view.selection.is_empty()) {
+        render_selection_fb(&mut fb, protein, view, camera, half_w, half_h, ts);
+    }
+
     // Post-pass: blend all rasterized pixels toward a cool blue-gray fog color
     // based on their z-buffer depth.  This gives uniform depth cues across all
     // rendering modes (triangles, lines, circles).
@@ -90,14 +148,30 @@ fn to_pixel(proj_x: f64, proj_y: f64, proj_z: f64, half_w: f64, half_h: f64) -> 
 }
 
 // ---------------------------------------------------------------------------
-// Tile-based parallel cartoon rasterization
+// Band-based parallel cartoon rasterization
 // ---------------------------------------------------------------------------
 
-/// Tile size in pixels.  64x64 is a good balance between parallelism (many
-/// tiles) and per-tile overhead (triangle binning, allocation).
-const TILE_SIZE: usize = 64;
+/// Inside-test epsilon, shared by the scanline span solver and the exact
+/// per-pixel test so the two always agree.
+const EDGE_EPS: f64 = 1e-6;
 
-/// A projected, shaded triangle ready for rasterization into tiles.
+/// Target number of horizontal bands per worker thread.
+///
+/// Bands are the unit of parallelism *and* of triangle binning.  More bands per
+/// thread balances uneven triangle distribution (a protein rarely fills the
+/// viewport evenly) at the cost of re-visiting triangles that straddle a band
+/// boundary.  Four is enough to keep every worker busy without meaningfully
+/// inflating the bin lists.
+const BANDS_PER_THREAD: usize = 4;
+
+/// Smallest band height in pixels.  Below this the per-band bookkeeping starts
+/// to cost more than the parallelism buys.
+const MIN_BAND_HEIGHT: usize = 16;
+
+/// A projected, shaded triangle ready for rasterization.
+///
+/// The barycentric setup is computed once here, in the parallel projection
+/// pass, rather than once per band the triangle touches.
 struct ProjectedTriangle {
     /// Screen-space vertices `[x, y, z]`.
     verts: [[f64; 3]; 3],
@@ -108,9 +182,37 @@ struct ProjectedTriangle {
     max_x: usize,
     min_y: usize,
     max_y: usize,
+    /// Barycentric coefficients: `u = u_x * dx + u_yc * dy`, likewise for `v`,
+    /// where `dx`/`dy` are offsets from vertex 2.
+    u_x: f64,
+    v_x: f64,
+    u_yc: f64,
+    v_yc: f64,
 }
 
-/// Context for tile-based cartoon rasterization, reducing parameter count.
+impl ProjectedTriangle {
+    /// Placeholder for a triangle that is off-screen or degenerate.  An empty
+    /// bounding box (`min_x > max_x`) is the marker.
+    const CULLED: Self = Self {
+        verts: [[0.0; 3]; 3],
+        shaded: [0; 3],
+        min_x: 1,
+        max_x: 0,
+        min_y: 1,
+        max_y: 0,
+        u_x: 0.0,
+        v_x: 0.0,
+        u_yc: 0.0,
+        v_yc: 0.0,
+    };
+
+    #[inline]
+    fn is_culled(&self) -> bool {
+        self.min_x > self.max_x
+    }
+}
+
+/// Context for band-based cartoon rasterization, reducing parameter count.
 struct TiledRenderCtx {
     half_w: f64,
     half_h: f64,
@@ -119,30 +221,30 @@ struct TiledRenderCtx {
     light_dir: [f64; 3],
 }
 
-/// A rasterized tile with its position, dimensions, and pixel data.
-struct RenderedTile {
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-    color: Vec<[u8; 3]>,
-    depth: Vec<f32>,
-}
-
-/// Render the cartoon mesh using tile-based parallel rasterization.
+/// Render the cartoon mesh using band-based parallel rasterization.
 ///
-/// 1. Project all triangles serially (Lambert shade).
-/// 2. Bin projected triangles into screen-space tiles.
-/// 3. Rasterize each tile in parallel via rayon -- each tile owns its own
-///    color/depth arrays so no synchronization is needed.
-/// 4. Merge tile results back into the main framebuffer.
+/// 1. Project, shade and set up all triangles (parallel).
+/// 2. Bin them into horizontal screen bands via a flat CSR index.
+/// 3. Rasterize each band in parallel, writing **straight into** the
+///    framebuffer rows that band owns -- bands are disjoint row ranges, so no
+///    synchronization, no per-band scratch buffers, and no merge pass.
 fn render_cartoon_tiled(
     fb: &mut Framebuffer,
     mesh: &[RibbonTriangle],
     cache: &crate::render::camera::ProjectionCache,
     ctx: &TiledRenderCtx,
 ) {
-    const AMBIENT: f64 = 0.55;
+    // Ambient floor, and with it the shading contrast: intensity runs from
+    // AMBIENT on the unlit side to 1.0 facing the light.
+    //
+    // This used to be 0.55 applied to `abs(dot) * 0.4 + 0.6`, which spans only
+    // 0.82..1.00 -- a barely visible 18% -- so cartoons came out looking flat
+    // and washed out.  That formula was compensating for normals whose sign was
+    // arbitrary: rings inherited their winding from a frame that flips along
+    // the spline, so `abs` was the only way to shade them consistently.  Now
+    // that the mesh is wound outward throughout, the true normal can be used
+    // and the range opened up to something that actually reads as form.
+    const AMBIENT: f64 = 0.35;
     let half_w = ctx.half_w;
     let half_h = ctx.half_h;
     let px_w = ctx.px_w;
@@ -150,194 +252,326 @@ fn render_cartoon_tiled(
     let light_dir = ctx.light_dir;
 
     // ------------------------------------------------------------------
-    // Step 1: Project and shade all triangles (serial).
+    // Step 1: Project, shade and set up all triangles (parallel).
     // ------------------------------------------------------------------
-    let projected: Vec<ProjectedTriangle> = mesh
-        .iter()
-        .filter_map(|tri| {
-            let v0 = cache.project(tri.verts[0][0], tri.verts[0][1], tri.verts[0][2]);
-            let v1 = cache.project(tri.verts[1][0], tri.verts[1][1], tri.verts[1][2]);
-            let v2 = cache.project(tri.verts[2][0], tri.verts[2][1], tri.verts[2][2]);
+    // Reuse the projected-triangle buffer across frames.  At interactive
+    // resolutions this array is several megabytes; reallocating and re-faulting
+    // it every frame showed up as the single largest allocator cost in a
+    // profile of the render loop.
+    SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        let projected: &mut Vec<ProjectedTriangle> = &mut scratch;
+        mesh.par_iter()
+            .map(|tri| {
+                let v0 = cache.project(tri.verts[0][0], tri.verts[0][1], tri.verts[0][2]);
+                let v1 = cache.project(tri.verts[1][0], tri.verts[1][1], tri.verts[1][2]);
+                let v2 = cache.project(tri.verts[2][0], tri.verts[2][1], tri.verts[2][2]);
 
-            let sv0 = to_pixel(v0.x, v0.y, v0.z, half_w, half_h);
-            let sv1 = to_pixel(v1.x, v1.y, v1.z, half_w, half_h);
-            let sv2 = to_pixel(v2.x, v2.y, v2.z, half_w, half_h);
+                let sv0 = to_pixel(v0.x, v0.y, v0.z, half_w, half_h);
+                let sv1 = to_pixel(v1.x, v1.y, v1.z, half_w, half_h);
+                let sv2 = to_pixel(v2.x, v2.y, v2.z, half_w, half_h);
 
-            // Screen-space bounding box clamped to framebuffer.
-            let fmin_x = sv0[0].min(sv1[0]).min(sv2[0]).floor() as isize;
-            let fmax_x = sv0[0].max(sv1[0]).max(sv2[0]).ceil() as isize;
-            let fmin_y = sv0[1].min(sv1[1]).min(sv2[1]).floor() as isize;
-            let fmax_y = sv0[1].max(sv1[1]).max(sv2[1]).ceil() as isize;
+                // Screen-space bounding box clamped to framebuffer.
+                let fmin_x = sv0[0].min(sv1[0]).min(sv2[0]).floor() as isize;
+                let fmax_x = sv0[0].max(sv1[0]).max(sv2[0]).ceil() as isize;
+                let fmin_y = sv0[1].min(sv1[1]).min(sv2[1]).floor() as isize;
+                let fmax_y = sv0[1].max(sv1[1]).max(sv2[1]).ceil() as isize;
 
-            let min_x = fmin_x.max(0) as usize;
-            let max_x = (fmax_x.max(0) as usize).min(px_w.saturating_sub(1));
-            let min_y = fmin_y.max(0) as usize;
-            let max_y = (fmax_y.max(0) as usize).min(px_h.saturating_sub(1));
+                let min_x = fmin_x.max(0) as usize;
+                let max_x = (fmax_x.max(0) as usize).min(px_w.saturating_sub(1));
+                let min_y = fmin_y.max(0) as usize;
+                let max_y = (fmax_y.max(0) as usize).min(px_h.saturating_sub(1));
 
-            if min_x > max_x || min_y > max_y {
-                return None;
-            }
+                // Barycentric denominator (twice the signed screen-space area).
+                let denom =
+                    (sv1[1] - sv2[1]) * (sv0[0] - sv2[0]) + (sv2[0] - sv1[0]) * (sv0[1] - sv2[1]);
 
-            // Two-sided half-Lambert shading (identical to `rasterize_triangle_depth`).
-            let rn = cache.rotate_normal(tri.normal[0], tri.normal[1], tri.normal[2]);
-            let dot = rn[0] * light_dir[0] + rn[1] * light_dir[1] + rn[2] * light_dir[2];
-            let half_lambert = dot.abs() * 0.4 + 0.6;
-            let intensity = AMBIENT + (1.0 - AMBIENT) * half_lambert;
-            let shaded: [u8; 3] = [
-                (tri.color[0] as f64 * intensity).min(255.0) as u8,
-                (tri.color[1] as f64 * intensity).min(255.0) as u8,
-                (tri.color[2] as f64 * intensity).min(255.0) as u8,
-            ];
-
-            Some(ProjectedTriangle {
-                verts: [sv0, sv1, sv2],
-                shaded,
-                min_x,
-                max_x,
-                min_y,
-                max_y,
-            })
-        })
-        .collect();
-
-    if projected.is_empty() {
-        return;
-    }
-
-    // ------------------------------------------------------------------
-    // Step 2: Create tile grid and bin triangles into tiles.
-    // ------------------------------------------------------------------
-    let cols = px_w.div_ceil(TILE_SIZE);
-    let rows = px_h.div_ceil(TILE_SIZE);
-    let num_tiles = cols * rows;
-    let mut tile_triangles: Vec<Vec<usize>> = vec![Vec::new(); num_tiles];
-
-    for (tri_idx, tri) in projected.iter().enumerate() {
-        let tc0 = tri.min_x / TILE_SIZE;
-        let tc1 = tri.max_x / TILE_SIZE;
-        let tr0 = tri.min_y / TILE_SIZE;
-        let tr1 = tri.max_y / TILE_SIZE;
-        for tr in tr0..=tr1 {
-            for tc in tc0..=tc1 {
-                tile_triangles[tr * cols + tc].push(tri_idx);
-            }
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Step 3: Rasterize tiles in parallel.
-    // ------------------------------------------------------------------
-    // Each tile produces its own local color and depth buffers.
-    let tiles: Vec<RenderedTile> = tile_triangles
-        .into_par_iter()
-        .enumerate()
-        .map(|(tile_idx, tri_indices)| {
-            let tx = (tile_idx % cols) * TILE_SIZE;
-            let ty = (tile_idx / cols) * TILE_SIZE;
-            let tw = TILE_SIZE.min(px_w.saturating_sub(tx));
-            let th = TILE_SIZE.min(px_h.saturating_sub(ty));
-
-            let mut color = vec![[0u8; 3]; tw * th];
-            let mut depth = vec![f32::INFINITY; tw * th];
-
-            for &tri_idx in &tri_indices {
-                let tri = &projected[tri_idx];
-                rasterize_into_tile(&mut color, &mut depth, tw, th, tx, ty, tri);
-            }
-
-            RenderedTile {
-                x: tx,
-                y: ty,
-                w: tw,
-                h: th,
-                color,
-                depth,
-            }
-        })
-        .collect();
-
-    // ------------------------------------------------------------------
-    // Step 4: Merge tiles back into the main framebuffer.
-    // ------------------------------------------------------------------
-    for tile in &tiles {
-        for ly in 0..tile.h {
-            for lx in 0..tile.w {
-                let ti = ly * tile.w + lx;
-                let fi = (tile.y + ly) * px_w + (tile.x + lx);
-                if tile.depth[ti] < fb.depth[fi] {
-                    fb.color[fi] = tile.color[ti];
-                    fb.depth[fi] = tile.depth[ti];
+                // Off-screen or degenerate: emit a culled entry rather than
+                // filtering, so the parallel map stays indexed and can write
+                // straight into the reused buffer without any reallocation.
+                //
+                // Back faces are *not* culled here, though the winding is now
+                // consistent enough to do it (see `ribbon::push_wound`).  The
+                // ribbon surface is not watertight: a sheet's arrowhead and the
+                // coil after it meet at a T-junction, where a vertex lands
+                // mid-edge on its neighbour.  Edge counts can be balanced by
+                // sealing the gaps, but the T-junctions still crack open into
+                // hairline slivers once the back faces behind them stop being
+                // drawn.  Culling saves a few milliseconds on a frame that
+                // already fits its budget several times over, which does not
+                // justify shipping those artifacts; it needs the arrowhead
+                // seam re-tessellated first.
+                if min_x > max_x || min_y > max_y || denom.abs() < 1e-12 {
+                    return ProjectedTriangle::CULLED;
                 }
+                let inv_denom = 1.0 / denom;
+
+                // Two-sided half-Lambert shading (identical to `rasterize_triangle_depth`).
+                let rn = cache.rotate_normal(tri.normal[0], tri.normal[1], tri.normal[2]);
+                // Depth increases away from the viewer, so a normal facing the
+                // camera has negative z; the light is specified in front of the
+                // scene.  Flip z to put the two in the same frame.
+                let dot = rn[0] * light_dir[0] + rn[1] * light_dir[1] - rn[2] * light_dir[2];
+                // Half-Lambert wrap: the terminator is soft, so a ribbon
+                // turning away from the light shades off gradually instead of
+                // hitting a hard edge, and nothing goes black.
+                let wrapped = dot.mul_add(0.5, 0.5);
+                let intensity = AMBIENT + (1.0 - AMBIENT) * wrapped;
+                let shaded: [u8; 3] = [
+                    (tri.color[0] as f64 * intensity).min(255.0) as u8,
+                    (tri.color[1] as f64 * intensity).min(255.0) as u8,
+                    (tri.color[2] as f64 * intensity).min(255.0) as u8,
+                ];
+
+                ProjectedTriangle {
+                    verts: [sv0, sv1, sv2],
+                    shaded,
+                    min_x,
+                    max_x,
+                    min_y,
+                    max_y,
+                    u_x: (sv1[1] - sv2[1]) * inv_denom,
+                    v_x: (sv2[1] - sv0[1]) * inv_denom,
+                    u_yc: (sv2[0] - sv1[0]) * inv_denom,
+                    v_yc: (sv0[0] - sv2[0]) * inv_denom,
+                }
+            })
+            .collect_into_vec(projected);
+
+        if projected.is_empty() {
+            return;
+        }
+
+        // ------------------------------------------------------------------
+        // Step 2: Bin triangles into horizontal bands (flat CSR index).
+        // ------------------------------------------------------------------
+        // A `Vec<Vec<usize>>` would allocate and grow one heap buffer per band
+        // every frame; counting first and scattering into a single flat array
+        // costs two linear passes and one allocation.
+        let threads = rayon::current_num_threads().max(1);
+        let band_h = (px_h.div_ceil(threads * BANDS_PER_THREAD)).max(MIN_BAND_HEIGHT);
+        let num_bands = px_h.div_ceil(band_h);
+
+        let mut offsets = vec![0u32; num_bands + 1];
+        for tri in projected.iter().filter(|t| !t.is_culled()) {
+            let b0 = tri.min_y / band_h;
+            let b1 = tri.max_y / band_h;
+            for slot in &mut offsets[b0 + 1..=b1 + 1] {
+                *slot += 1;
             }
         }
-    }
+        for i in 0..num_bands {
+            offsets[i + 1] += offsets[i];
+        }
+        let mut items = vec![0u32; offsets[num_bands] as usize];
+        let mut cursor = offsets.clone();
+        for (tri_idx, tri) in projected.iter().enumerate() {
+            if tri.is_culled() {
+                continue;
+            }
+            let b0 = tri.min_y / band_h;
+            let b1 = tri.max_y / band_h;
+            for b in b0..=b1 {
+                items[cursor[b] as usize] = tri_idx as u32;
+                cursor[b] += 1;
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Step 3: Rasterize bands in parallel, straight into the framebuffer.
+        // ------------------------------------------------------------------
+        let projected: &[ProjectedTriangle] = projected;
+        let items = &items;
+        let offsets = &offsets;
+        fb.color
+            .par_chunks_mut(band_h * px_w)
+            .zip(fb.depth.par_chunks_mut(band_h * px_w))
+            .enumerate()
+            .for_each(|(band, (color, depth))| {
+                let y0 = band * band_h;
+                let rows = color.len() / px_w;
+                let lo = offsets[band] as usize;
+                let hi = offsets[band + 1] as usize;
+                for &tri_idx in &items[lo..hi] {
+                    rasterize_band(color, depth, px_w, y0, rows, &projected[tri_idx as usize]);
+                }
+            });
+    });
 }
 
-/// Rasterize a single projected triangle into a tile's local buffers.
+thread_local! {
+    static SCRATCH: std::cell::RefCell<Vec<ProjectedTriangle>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A triangle edge as a moving x-bound while walking down scanlines.
 ///
-/// The algorithm is identical to `Framebuffer::rasterize_triangle_depth` but
-/// operates on tile-local coordinate arrays.  `tx`/`ty` are the pixel
-/// coordinates of the tile's top-left corner in the full framebuffer.
+/// Each barycentric constraint has the form `a * dx + c * dy >= t`, so the `dx`
+/// at which it flips is `t/a - (c/a) * dy` — **linear in `dy`**.  Solving that
+/// once per triangle and then stepping by the slope each scanline replaces
+/// three floating-point divisions per scanline with one addition.
+#[derive(Clone, Copy)]
+struct EdgeBound {
+    /// Current bound on `dx`, valid for the scanline being processed.
+    at: f64,
+    /// How the bound moves per scanline.
+    step: f64,
+}
+
+/// A constraint whose `dx` coefficient is zero: it does not bound `x` at all,
+/// it just switches whole scanlines on or off.
+#[derive(Clone, Copy)]
+struct FlatBound {
+    c: f64,
+    t: f64,
+}
+
+/// Rasterize one projected triangle into the framebuffer rows owned by a band.
+///
+/// `y0` is the framebuffer row the band starts at and `rows` is how many rows
+/// it owns; `color`/`depth` are that band's slices, so row `py` lives at
+/// `(py - y0) * px_w`.
+///
+/// Rather than scanning the triangle's full bounding box and rejecting most of
+/// it — ribbon triangles are thin slivers whose bounding box is several times
+/// their area — each scanline is reduced to the x-range where all three
+/// barycentric half-planes can hold, walked incrementally down the triangle.
+/// The exact same inside test then runs over just that range, widened by a
+/// pixel at each end so floating-point error can never clip a covered pixel.
 #[inline]
-fn rasterize_into_tile(
+fn rasterize_band(
     color: &mut [[u8; 3]],
     depth: &mut [f32],
-    tw: usize,
-    th: usize,
-    tx: usize,
-    ty: usize,
+    px_w: usize,
+    y0: usize,
+    rows: usize,
     tri: &ProjectedTriangle,
 ) {
     let [v0, v1, v2] = tri.verts;
 
-    // Clamp the triangle's bounding box to this tile.
-    let min_x = tri.min_x.max(tx);
-    let max_x = tri.max_x.min((tx + tw).saturating_sub(1));
-    let min_y = tri.min_y.max(ty);
-    let max_y = tri.max_y.min((ty + th).saturating_sub(1));
-
-    if min_x > max_x || min_y > max_y {
+    let y_start = tri.min_y.max(y0);
+    let y_end = tri.max_y.min(y0 + rows - 1);
+    if y_start > y_end || tri.min_x > tri.max_x {
         return;
     }
 
-    // Barycentric denominator (same math as `rasterize_triangle_depth`).
-    let denom = (v1[1] - v2[1]) * (v0[0] - v2[0]) + (v2[0] - v1[0]) * (v0[1] - v2[1]);
-    if denom.abs() < 1e-12 {
-        return; // degenerate triangle
+    let (u_x, v_x, u_yc, v_yc) = (tri.u_x, tri.v_x, tri.u_yc, tri.v_yc);
+    // w = 1 - u - v, so `w >= -EPS` is `-(u_x+v_x) dx - (u_yc+v_yc) dy >= -1-EPS`.
+    let dy_start = y_start as f64 + 0.5 - v2[1];
+
+    let mut lower: [EdgeBound; 3] = [EdgeBound { at: 0.0, step: 0.0 }; 3];
+    let mut upper: [EdgeBound; 3] = [EdgeBound { at: 0.0, step: 0.0 }; 3];
+    let mut flat: [FlatBound; 3] = [FlatBound { c: 0.0, t: 0.0 }; 3];
+    let (mut n_lower, mut n_upper, mut n_flat) = (0usize, 0usize, 0usize);
+
+    for (a, c, t) in [
+        (u_x, u_yc, -EDGE_EPS),
+        (v_x, v_yc, -EDGE_EPS),
+        (-(u_x + v_x), -(u_yc + v_yc), -1.0 - EDGE_EPS),
+    ] {
+        if a == 0.0 {
+            flat[n_flat] = FlatBound { c, t };
+            n_flat += 1;
+            continue;
+        }
+        let inv_a = 1.0 / a;
+        let step = -c * inv_a;
+        let bound = EdgeBound {
+            at: t * inv_a + step * dy_start,
+            step,
+        };
+        if a > 0.0 {
+            lower[n_lower] = bound;
+            n_lower += 1;
+        } else {
+            upper[n_upper] = bound;
+            n_upper += 1;
+        }
     }
-    let inv_denom = 1.0 / denom;
 
-    let u_x_step = (v1[1] - v2[1]) * inv_denom;
-    let v_x_step = (v2[1] - v0[1]) * inv_denom;
-    let u_y_coeff = (v2[0] - v1[0]) * inv_denom;
-    let v_y_coeff = (v0[0] - v2[0]) * inv_denom;
+    for py in y_start..=y_end {
+        let dy = py as f64 + 0.5 - v2[1];
 
-    for py in min_y..=max_y {
-        let pf_y = py as f64 + 0.5;
-        let dy = pf_y - v2[1];
-        let u_y = u_y_coeff * dy;
-        let v_y = v_y_coeff * dy;
+        // Constraints independent of x either admit the whole scanline or none
+        // of it.
+        let scanline_live = flat[..n_flat].iter().all(|f| f.c * dy >= f.t);
 
-        for px in min_x..=max_x {
-            let pf_x = px as f64 + 0.5;
-            let dx = pf_x - v2[0];
+        if scanline_live {
+            let mut lo = f64::NEG_INFINITY;
+            for b in &lower[..n_lower] {
+                if b.at > lo {
+                    lo = b.at;
+                }
+            }
+            let mut hi = f64::INFINITY;
+            for b in &upper[..n_upper] {
+                if b.at < hi {
+                    hi = b.at;
+                }
+            }
 
-            let u = u_x_step * dx + u_y;
-            let v = v_x_step * dx + v_y;
-            let w = 1.0 - u - v;
+            if lo <= hi {
+                // dx is measured from v2[0] at pixel centres, so
+                // px = dx + v2[0] - 0.5.  Widen by one pixel each way; the
+                // exact test below still decides.
+                let x_start = span_start(lo + v2[0] - 0.5, tri.min_x);
+                let x_end = span_end(hi + v2[0] - 0.5, tri.max_x);
 
-            if u >= -1e-6 && v >= -1e-6 && w >= -1e-6 {
-                let z = (u * v0[2] + v * v1[2] + w * v2[2]) as f32;
-                let lx = px - tx;
-                let ly = py - ty;
-                let ti = ly * tw + lx;
-                if z < depth[ti] {
-                    depth[ti] = z;
-                    color[ti] = tri.shaded;
+                if x_start <= x_end {
+                    let u_y = u_yc * dy;
+                    let v_y = v_yc * dy;
+                    let base = (py - y0) * px_w;
+                    for px in x_start..=x_end {
+                        let dx = px as f64 + 0.5 - v2[0];
+                        let u = u_x * dx + u_y;
+                        let v = v_x * dx + v_y;
+                        let w = 1.0 - u - v;
+
+                        if u >= -EDGE_EPS && v >= -EDGE_EPS && w >= -EDGE_EPS {
+                            let z = (u * v0[2] + v * v1[2] + w * v2[2]) as f32;
+                            let i = base + px;
+                            if z < depth[i] {
+                                depth[i] = z;
+                                color[i] = tri.shaded;
+                            }
+                        }
+                    }
                 }
             }
         }
+
+        for b in &mut lower[..n_lower] {
+            b.at += b.step;
+        }
+        for b in &mut upper[..n_upper] {
+            b.at += b.step;
+        }
     }
+}
+
+/// First pixel column to test, never above `floor` and never below 0.
+/// A NaN or infinite bound falls back to the triangle's bounding box.
+#[inline]
+fn span_start(x: f64, floor_x: usize) -> usize {
+    if x.is_nan() {
+        return floor_x;
+    }
+    // Rust saturates out-of-range float-to-int casts, so this is safe for +-inf.
+    let i = x.floor() as isize;
+    i.max(floor_x as isize) as usize
+}
+
+/// Last pixel column to test, never beyond `ceil_x`.
+#[inline]
+fn span_end(x: f64, ceil_x: usize) -> usize {
+    if x.is_nan() {
+        return ceil_x;
+    }
+    let i = x.ceil() as isize;
+    if i < 0 {
+        return 0;
+    }
+    (i as usize).min(ceil_x)
 }
 
 /// Render backbone CA trace to framebuffer.
@@ -516,6 +750,138 @@ fn render_ligands_fb(
     }
 }
 
+/// Draw the residues picked in the sequence panel.
+///
+/// With ball-and-stick on, every atom of a picked residue becomes a sphere and
+/// every bond a stick, including the peptide or phosphodiester bond into the
+/// next picked residue so a selected stretch reads as one connected fragment.
+/// With it off, a single marker sphere per residue says where the selection is
+/// without hiding the cartoon underneath.
+fn render_selection_fb(
+    fb: &mut Framebuffer,
+    protein: &Protein,
+    view: SelectionView<'_>,
+    camera: &Camera,
+    half_w: f64,
+    half_h: f64,
+    ts: f64,
+) {
+    let marker = palette().selection.marker.0;
+    let carbon = palette().selection.carbon.0;
+
+    for (chain_index, chain) in protein.chains.iter().enumerate() {
+        for (residue_index, residue) in chain.residues.iter().enumerate() {
+            if !view.selection.contains(chain_index, residue_index) {
+                continue;
+            }
+
+            if !view.ball_and_stick {
+                // One sphere on the backbone atom (CA / C4'), or on the first
+                // atom of a residue that has no backbone atom at all.
+                if let Some(atom) = residue
+                    .atoms
+                    .iter()
+                    .find(|atom| atom.is_backbone)
+                    .or_else(|| residue.atoms.first())
+                {
+                    let projected = camera.project(atom.x, atom.y, atom.z);
+                    let px = to_pixel(projected.x, projected.y, projected.z, half_w, half_h);
+                    // The backbone atom sits *inside* the ribbon, so an
+                    // unbiased marker would be hidden by the very residue it
+                    // marks.  Pulling it forward by a ribbon half-width makes
+                    // it visible while anything genuinely in front still wins.
+                    fb.draw_circle_z(px[0], px[1], px[2] - MARKER_DEPTH_BIAS, 4.0 * ts, marker);
+                }
+                continue;
+            }
+
+            let atoms: Vec<([f64; 3], [u8; 3], &Atom)> = residue
+                .atoms
+                .iter()
+                .map(|atom| {
+                    let projected = camera.project(atom.x, atom.y, atom.z);
+                    let px = to_pixel(projected.x, projected.y, projected.z, half_w, half_h);
+                    (px, selection_atom_color(atom, carbon), atom)
+                })
+                .collect();
+
+            for (px, color, atom) in &atoms {
+                fb.draw_circle_z(px[0], px[1], px[2], atom_radius(atom) * ts, *color);
+            }
+
+            for i in 0..atoms.len() {
+                for j in (i + 1)..atoms.len() {
+                    let (p1, c1, a1) = &atoms[i];
+                    let (p2, _, a2) = &atoms[j];
+                    if atoms_bonded(&a1.element, a1.x, a1.y, a1.z, &a2.element, a2.x, a2.y, a2.z) {
+                        fb.draw_thick_line_3d(*p1, *p2, *c1, 2.0 * ts);
+                    }
+                }
+            }
+
+            // Link to the next residue when it is picked too.
+            let next_index = residue_index + 1;
+            if !view.selection.contains(chain_index, next_index) {
+                continue;
+            }
+            let Some(next) = chain.residues.get(next_index) else {
+                continue;
+            };
+            if let Some((from, to)) = linking_atoms(chain.molecule_type, residue, next) {
+                let p1 = camera.project(from.x, from.y, from.z);
+                let p2 = camera.project(to.x, to.y, to.z);
+                fb.draw_thick_line_3d(
+                    to_pixel(p1.x, p1.y, p1.z, half_w, half_h),
+                    to_pixel(p2.x, p2.y, p2.z, half_w, half_h),
+                    selection_atom_color(from, carbon),
+                    2.0 * ts,
+                );
+            }
+        }
+    }
+}
+
+/// CPK color, except that carbon takes the selection color: the standard way
+/// to make one fragment of a structure legible without recoloring chemistry.
+pub(crate) fn selection_atom_color(atom: &Atom, carbon: [u8; 3]) -> [u8; 3] {
+    if atom.element.trim().eq_ignore_ascii_case("C") {
+        carbon
+    } else {
+        color_to_rgb(ColorScheme::element_color(atom))
+    }
+}
+
+/// Sphere radius in framebuffer units before thickness scaling.
+pub(crate) fn atom_radius(atom: &Atom) -> f64 {
+    match atom.element.trim() {
+        "H" => 1.4,
+        "C" => 2.6,
+        "N" | "O" => 2.8,
+        "S" | "P" => 3.2,
+        _ => 3.0,
+    }
+}
+
+/// How far forward, in angstroms, a selection marker is pushed so it clears
+/// the ribbon drawn around its own backbone atom.
+const MARKER_DEPTH_BIAS: f64 = 3.5;
+
+/// The covalent bond joining consecutive polymer residues.
+pub(crate) fn linking_atoms<'a>(
+    molecule_type: MoleculeType,
+    current: &'a Residue,
+    next: &'a Residue,
+) -> Option<(&'a Atom, &'a Atom)> {
+    let (from, to) = match molecule_type {
+        MoleculeType::RNA | MoleculeType::DNA => ("O3'", "P"),
+        MoleculeType::Protein => ("C", "N"),
+        MoleculeType::SmallMolecule => return None,
+    };
+    let a = current.atoms.iter().find(|atom| atom.name.trim() == from)?;
+    let b = next.atoms.iter().find(|atom| atom.name.trim() == to)?;
+    Some((a, b))
+}
+
 /// Render non-covalent interaction lines as dashed segments in the framebuffer.
 fn render_interactions_fb(
     fb: &mut Framebuffer,
@@ -549,5 +915,304 @@ fn interaction_color(t: InteractionType) -> [u8; 3] {
         InteractionType::SaltBridge => [255, 80, 80],   // red
         InteractionType::HydrophobicContact => [220, 200, 60], // yellow
         InteractionType::Other => [160, 160, 160],      // gray
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::protein::{Atom, Chain, MoleculeType, Residue, SecondaryStructure};
+    use crate::render::color::ColorSchemeType;
+
+    /// A short CA trace running diagonally across the view.
+    fn trace_protein() -> Protein {
+        let atom = |x: f64, y: f64| Atom {
+            name: "CA".to_string(),
+            element: "C".to_string(),
+            x,
+            y,
+            z: 0.0,
+            b_factor: 20.0,
+            is_backbone: true,
+            is_hetero: false,
+        };
+        let residues = (0..12)
+            .map(|i| Residue {
+                name: "ALA".to_string(),
+                seq_num: i + 1,
+                insertion_code: None,
+                atoms: vec![atom(i as f64 * 6.0 - 33.0, i as f64 * 3.0 - 16.0)],
+                secondary_structure: SecondaryStructure::Coil,
+            })
+            .collect();
+        Protein {
+            name: "trace".to_string(),
+            chains: vec![Chain {
+                id: "A".to_string(),
+                residues,
+                molecule_type: MoleculeType::Protein,
+            }],
+            ligands: Vec::new(),
+        }
+    }
+
+    /// Fraction of framebuffer pixels carrying geometry.
+    fn ink_fraction(fb: &Framebuffer) -> f64 {
+        let lit = fb.color.iter().filter(|c| **c != [0, 0, 0]).count();
+        lit as f64 / fb.color.len() as f64
+    }
+
+    /// Bounding box of lit pixels, expressed as fractions of the framebuffer
+    /// dimensions.  This is the protein's *apparent* size: what the viewer sees
+    /// once the buffer is downsampled onto the terminal cell grid.
+    fn normalized_bbox(fb: &Framebuffer) -> (f64, f64) {
+        let (mut min_x, mut max_x) = (usize::MAX, 0usize);
+        let (mut min_y, mut max_y) = (usize::MAX, 0usize);
+        for y in 0..fb.height {
+            for x in 0..fb.width {
+                if fb.color[y * fb.width + x] != [0, 0, 0] {
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+        assert!(min_x != usize::MAX, "fixture should draw something");
+        (
+            (max_x - min_x) as f64 / fb.width as f64,
+            (max_y - min_y) as f64 / fb.height as f64,
+        )
+    }
+
+    /// Render the fixture the way the viewport does: the framebuffer is scaled
+    /// by `ssaa`, and the camera is scaled to match because zoom and pan are
+    /// both in framebuffer pixel units.
+    fn render_trace(out_w: f64, out_h: f64, ssaa: f64) -> Framebuffer {
+        let protein = trace_protein();
+        let mut camera = Camera::default();
+        camera.zoom = 4.0 * ssaa;
+        let scheme = ColorScheme::new(ColorSchemeType::Structure, 12);
+        render_hd_framebuffer_ssaa(
+            &protein,
+            &camera,
+            &scheme,
+            VizMode::Backbone,
+            out_w * ssaa,
+            out_h * ssaa,
+            &[],
+            false,
+            &[],
+            None,
+            ssaa,
+        )
+    }
+
+    #[test]
+    fn supersampling_preserves_apparent_size() {
+        // HDplus must render the protein at the same apparent size as HD.
+        // Scaling the framebuffer by `ssaa` without scaling the camera would
+        // leave the protein covering the same pixel count in a buffer twice as
+        // wide, i.e. half the size once downsampled.
+        let (bw, bh) = normalized_bbox(&render_trace(400.0, 184.0, 1.0));
+        let (pw, ph) = normalized_bbox(&render_trace(400.0, 184.0, 2.0));
+
+        assert!(
+            (pw - bw).abs() < 0.02 && (ph - bh).abs() < 0.02,
+            "supersampled extent ({pw:.3}, {ph:.3}) should match base ({bw:.3}, {bh:.3})"
+        );
+    }
+
+    #[test]
+    fn supersampling_preserves_apparent_line_thickness() {
+        // Line thickness must be derived from the *output* resolution and then
+        // scaled by the supersampling factor, so strokes occupy the same
+        // fraction of the frame.  Deriving it from the supersampled width
+        // instead lets the clamp floor in `ts` absorb the factor and renders
+        // strokes too thin once downsampled.
+        let base = ink_fraction(&render_trace(400.0, 184.0, 1.0));
+        let supersampled = ink_fraction(&render_trace(400.0, 184.0, 2.0));
+
+        let ratio = supersampled / base;
+        assert!(
+            (0.9..=1.1).contains(&ratio),
+            "supersampled ink fraction {supersampled:.4} should match base {base:.4} within 10% (ratio {ratio:.3})"
+        );
+    }
+
+    #[test]
+    fn ssaa_factor_is_ignored_when_invalid() {
+        // Guards against a NaN or sub-1 factor silently collapsing thickness.
+        let protein = trace_protein();
+        let mut camera = Camera::default();
+        camera.zoom = 4.0;
+        let scheme = ColorScheme::new(ColorSchemeType::Structure, 12);
+        let render = |ssaa: f64| {
+            render_hd_framebuffer_ssaa(
+                &protein,
+                &camera,
+                &scheme,
+                VizMode::Backbone,
+                400.0,
+                184.0,
+                &[],
+                false,
+                &[],
+                None,
+                ssaa,
+            )
+        };
+        let expected = ink_fraction(&render(1.0));
+        for bad in [f64::NAN, 0.0, -3.0] {
+            assert!(
+                (ink_fraction(&render(bad)) - expected).abs() < 1e-9,
+                "ssaa {bad} should fall back to 1.0"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use crate::model::protein::{Chain, Residue, SecondaryStructure};
+    use crate::model::residue_selection::ResidueSelection;
+    use crate::render::color::ColorSchemeType;
+
+    /// Six residues with a two-atom side chain each, spread across the view.
+    fn side_chain_protein() -> Protein {
+        let atom = |name: &str, element: &str, x: f64, y: f64, backbone: bool| Atom {
+            name: name.to_string(),
+            element: element.to_string(),
+            x,
+            y,
+            z: 0.0,
+            b_factor: 20.0,
+            is_backbone: backbone,
+            is_hetero: false,
+        };
+        let residues = (0..6)
+            .map(|i| {
+                let x = i as f64 * 6.0 - 15.0;
+                Residue {
+                    name: "LEU".to_string(),
+                    seq_num: i + 1,
+                    insertion_code: None,
+                    atoms: vec![
+                        atom("CA", "C", x, 0.0, true),
+                        atom("CB", "C", x + 1.5, 1.5, false),
+                        atom("CG", "O", x + 2.6, 3.0, false),
+                    ],
+                    secondary_structure: SecondaryStructure::Coil,
+                }
+            })
+            .collect();
+        Protein {
+            name: "sidechains".to_string(),
+            chains: vec![Chain {
+                id: "A".to_string(),
+                residues,
+                molecule_type: MoleculeType::Protein,
+            }],
+            ligands: Vec::new(),
+        }
+    }
+
+    fn lit_pixels(fb: &Framebuffer) -> usize {
+        fb.color.iter().filter(|color| **color != [0, 0, 0]).count()
+    }
+
+    fn render(protein: &Protein, view: Option<SelectionView<'_>>) -> Framebuffer {
+        let mut camera = Camera::default();
+        camera.zoom = 8.0;
+        let scheme = ColorScheme::new(ColorSchemeType::Structure, protein.residue_count());
+        render_hd_framebuffer(
+            protein,
+            &camera,
+            &scheme,
+            VizMode::Backbone,
+            400.0,
+            300.0,
+            &[],
+            false,
+            &[],
+            view,
+        )
+    }
+
+    #[test]
+    fn selection_adds_ink_and_ball_and_stick_adds_more_than_markers() {
+        let protein = side_chain_protein();
+        let mut selection = ResidueSelection::new(&protein);
+        selection.set_range(0, 0, 2, true);
+
+        let plain = lit_pixels(&render(&protein, None));
+        let marked = lit_pixels(&render(
+            &protein,
+            Some(SelectionView {
+                selection: &selection,
+                ball_and_stick: false,
+            }),
+        ));
+        let ball_and_stick = lit_pixels(&render(
+            &protein,
+            Some(SelectionView {
+                selection: &selection,
+                ball_and_stick: true,
+            }),
+        ));
+
+        assert!(
+            plain < marked,
+            "markers should add ink: {plain} -> {marked}"
+        );
+        assert!(
+            marked < ball_and_stick,
+            "side chains should add more than markers: {marked} -> {ball_and_stick}"
+        );
+    }
+
+    #[test]
+    fn an_empty_selection_renders_identically_to_no_selection() {
+        // The overlay must be free when nothing is picked -- this is what lets
+        // the panel stay open with no selection and cost nothing.
+        let protein = side_chain_protein();
+        let empty = ResidueSelection::new(&protein);
+        let plain = render(&protein, None);
+        let with_empty = render(
+            &protein,
+            Some(SelectionView {
+                selection: &empty,
+                ball_and_stick: true,
+            }),
+        );
+        assert_eq!(plain.color, with_empty.color);
+    }
+
+    #[test]
+    fn only_picked_residues_gain_side_chains() {
+        // The projection mirrors x, so residue 0 lands right of centre; the
+        // far half of the frame must be untouched by picking it.
+        let protein = side_chain_protein();
+        let mut selection = ResidueSelection::new(&protein);
+        selection.set(0, 0, true);
+
+        let left_half = |fb: &Framebuffer| {
+            (0..fb.height)
+                .flat_map(|y| (0..fb.width / 2).map(move |x| y * fb.width + x))
+                .filter(|i| fb.color[*i] != [0, 0, 0])
+                .count()
+        };
+
+        let plain = render(&protein, None);
+        let picked = render(
+            &protein,
+            Some(SelectionView {
+                selection: &selection,
+                ball_and_stick: true,
+            }),
+        );
+        assert_eq!(left_half(&plain), left_half(&picked));
+        assert!(lit_pixels(&plain) < lit_pixels(&picked));
     }
 }

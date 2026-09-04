@@ -18,6 +18,7 @@ ratatui = "0.29"
 crossterm = "0.28"
 ratatui-image = { version = "9.0.0", default-features = false, features = ["crossterm"] }
 image = "0.25"
+libc = "0.2"
 pdbtbx = { version = "0.12", features = ["rstar"] }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
@@ -26,6 +27,7 @@ flate2 = "1"
 rayon = "1"
 reqwest = { version = "0.12", features = ["blocking"], optional = true }
 serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 serde_json = "1"
 tempfile = { version = "3.27.0", optional = true }
 tokio = { version = "1", features = ["rt", "macros"], optional = true }

@@ -1,15 +1,18 @@
-//! Compressed Kitty graphics protocol transmitter using raw RGBA + zlib.
+//! Kitty graphics protocol transmitter.
 //!
-//! ratatui-image sends Kitty images as raw RGBA32 base64-encoded (`f=32`),
-//! which is ~1.3MB per frame for a 640x384 render.  This module compresses
-//! the raw RGBA pixel data with zlib (level 1 / fastest) and sends it via
-//! the Kitty graphics protocol with `f=32,o=z`.  This avoids PNG's
-//! filtering, CRC checksums, and chunk framing overhead while still
-//! achieving good compression on protein renders (mostly black/transparent
-//! background).
+//! Two transports produce the same widget:
+//!
+//! * **Shared memory** (`t=s`), used whenever the terminal is local and
+//!   [`super::kitty_shm::probe`] confirmed support.  The pixels never enter the
+//!   escape sequence at all -- see that module.  This is the fast path.
+//! * **Escape codes** (`f=32,o=z`), for SSH sessions and terminals without
+//!   shared-memory support.  ratatui-image would send raw base64 RGBA here;
+//!   compressing with zlib first is 10-20x smaller on protein renders, which
+//!   are mostly transparent background, and that is what makes FullHD usable
+//!   over a network at all.
 //!
 //! Note: the file is still named `kitty_png.rs` for historical reasons and
-//! to minimize import churn.  The actual encoding is raw RGBA + zlib, not PNG.
+//! to minimize import churn.  Neither transport involves PNG.
 //!
 //! Unlike the original implementation which dumped the escape sequence into
 //! cell (0,0) and skipped everything else, this version uses Kitty's
@@ -30,7 +33,6 @@ use std::io::Write as IoWrite;
 use base64::Engine;
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
-use image::DynamicImage;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
@@ -40,12 +42,15 @@ use ratatui::widgets::Widget;
 /// image data — no flicker, no delete-before-draw gap.
 const IMAGE_ID: u32 = 1;
 
-/// A ratatui `Widget` that renders a `DynamicImage` via the Kitty graphics
-/// protocol using raw RGBA data with zlib compression (`f=32,o=z`) and
+/// A ratatui `Widget` that places a Kitty image over the render area using
 /// unicode placeholders.
 ///
-/// Named `KittyPngImage` for historical reasons; the actual encoding is
-/// zlib-compressed raw RGBA, not PNG.
+/// Construct it with [`KittyPngImage::from_shm`] to hand the terminal a shared
+/// memory object, or [`KittyPngImage::from_rgba`] to carry the pixels inline as
+/// zlib-compressed base64.  Only the transmit sequence differs; placement is
+/// identical either way.
+///
+/// Named `KittyPngImage` for historical reasons; neither transport uses PNG.
 pub struct KittyPngImage {
     transmit: String,
     unique_id: u32,
@@ -63,34 +68,48 @@ impl KittyPngImage {
         format!("\x1b_Gq=2,a=d,d=I,i={IMAGE_ID}\x1b\\")
     }
 
-    /// Create a new compressed Kitty image widget.
+    /// Point the terminal at pixels already written into a shared memory
+    /// object.  The payload is just the object's name, so the escape sequence
+    /// is a fixed ~60 bytes regardless of image size.
     ///
-    /// The image is immediately converted to raw RGBA, zlib-compressed
-    /// (level 1 / fastest), and base64-chunked into the Kitty escape
-    /// sequence.  Call this outside the draw closure if you want to time
-    /// encoding separately.
+    /// `byte_len` is the object's exact size, sent as `S=` so the terminal
+    /// reads the pixel data and nothing beyond it.
+    pub fn from_shm(shm_name: &str, w: u32, h: u32, byte_len: usize, area: Rect) -> Self {
+        let payload = base64::engine::general_purpose::STANDARD.encode(shm_name.as_bytes());
+        let (cols, rows) = (area.width, area.height);
+        // Reusing IMAGE_ID lets Kitty swap the image atomically, so there is no
+        // blank gap between frames; c=/r= make it span the whole placeholder
+        // grid, which also stretches a reduced-resolution frame back to size.
+        // See `from_rgba` for the full rationale.
+        let transmit = format!(
+            "\x1b_Gq=2,i={IMAGE_ID},a=T,U=1,f=32,t=s,s={w},v={h},c={cols},r={rows},S={byte_len};{payload}\x1b\\"
+        );
+        Self {
+            transmit,
+            unique_id: IMAGE_ID,
+            area,
+        }
+    }
+
+    /// Create a Kitty image widget that carries its pixels inline, zlib
+    /// compressed and base64 chunked.
+    ///
+    /// `rgba` must be exactly `w * h * 4` bytes.  Returns `None` if
+    /// compression fails, so the caller can fall back to braille rather than
+    /// crash the TUI.
     ///
     /// Uses a single fixed image ID (`IMAGE_ID`).  Transmitting with
     /// `a=T,U=1` for the same ID causes Kitty to atomically replace the
     /// old image data, so there is never a visible gap between frames.
     /// No delete commands are emitted during normal rendering.
-    pub fn new(img: &DynamicImage, area: Rect) -> Option<Self> {
-        let (w, h) = (img.width(), img.height());
-
-        // Get raw RGBA bytes from the image.
-        let rgba = img.to_rgba8();
-        let raw_bytes = rgba.as_raw();
-
+    pub fn from_rgba(rgba: &[u8], w: u32, h: u32, area: Rect) -> Option<Self> {
         // Compress with zlib level 1 (fastest).  Returns None on failure so
         // the caller can fall back to braille instead of crashing the TUI.
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
-        if encoder.write_all(raw_bytes).is_err() {
+        if encoder.write_all(rgba).is_err() {
             return None;
         }
-        let compressed = match encoder.finish() {
-            Ok(bytes) => bytes,
-            Err(_) => return None,
-        };
+        let compressed = encoder.finish().ok()?;
 
         // Base64.
         let b64 = base64::engine::general_purpose::STANDARD.encode(&compressed);

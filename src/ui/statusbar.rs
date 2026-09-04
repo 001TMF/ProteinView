@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::app::{App, ConnectionType, RenderMode, VizMode};
+use crate::render::palette::palette;
 
 /// Render the status bar showing current mode and info
 pub fn render_statusbar(frame: &mut Frame, area: Rect, app: &App) {
@@ -100,6 +101,28 @@ pub fn render_statusbar(frame: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::Rgb(255, 200, 0)),
             ));
             spans.push(Span::raw(" "));
+        }
+
+        // Show what the sequence panel has picked, so a selection made once is
+        // still accounted for after the panel is closed.
+        if !app.selection.is_empty() {
+            spans.push(Span::styled(
+                "\u{2502} ",
+                Style::default().fg(Color::DarkGray),
+            ));
+            let [red, green, blue] = palette().selection.marker.0;
+            spans.push(Span::styled(
+                format!("{} sel", app.selection.count()),
+                Style::default().fg(Color::Rgb(red, green, blue)),
+            ));
+            spans.push(Span::styled(
+                if app.show_ball_stick {
+                    " ball&stick "
+                } else {
+                    " marked "
+                },
+                Style::default().fg(Color::DarkGray),
+            ));
         }
 
         // Show interactions indicator
